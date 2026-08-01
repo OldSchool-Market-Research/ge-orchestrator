@@ -14,7 +14,7 @@ import (
 // validator constants; the vet is the mechanical backstop for a model that
 // ships below them anyway.
 const (
-	floorFPerCycleGp = 200_000
+	floorFPerCycleGp = 400_000
 	floorBPerCycleGp = 100_000
 	// evSanityFactor caps how far a claimed per-cycle EV may exceed the
 	// live recomputation (margin x fillable units) before it is vetoed.

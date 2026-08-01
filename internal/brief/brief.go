@@ -116,7 +116,7 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 		}
 		b.WriteString("\n")
 	}
-	b.WriteString("- Objective: rank ALL viable options by absolute post-tax gp/day at fillable size. The floor is absolute (F: 200k gp/cycle, B: 100k) — dismiss below-floor candidates whatever their ROI%. Shipping NOTHING is a legitimate outcome when nothing clears the bar.\n")
+	b.WriteString("- Objective: rank ALL viable options by absolute post-tax gp/day at fillable size. The floor is absolute (F: 400k gp/cycle = 100k gp/hr, B: 100k/cycle) — dismiss below-floor candidates whatever their ROI%. Shipping NOTHING is a legitimate outcome when nothing clears the bar.\n")
 	b.WriteString("- Every F/B strategy must state its attention contract (offer cadence, longest safe unattended window, reaction risk) — the operator decides what fits their day.\n")
 
 	writeOpenBook(ctx, &b, s, p)
