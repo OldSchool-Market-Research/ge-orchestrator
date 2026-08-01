@@ -90,6 +90,11 @@ type SidecarStrategy struct {
 	Risks         []string `json:"risks"`
 	PaperTrade    string   `json:"paper_trade"`
 
+	// HarnessProjectedPer1h is set by the vetter, never by the sidecar JSON:
+	// the harness's own haircut projection at ship time (eval.ProjectFlipPer1h),
+	// stored as projected_per_1h_gp and used as the confirm-ratio denominator.
+	HarnessProjectedPer1h *int64 `json:"-"`
+
 	BuyWindow       *HourWindow `json:"buy_window,omitempty"`
 	SellWindow      *HourWindow `json:"sell_window,omitempty"`
 	Trigger         *Trigger    `json:"trigger,omitempty"`
@@ -196,17 +201,17 @@ func insertStrategy(ctx context.Context, tx pgx.Tx, runID int64, openedAt time.T
 		(run_id, sid, archetype, title, thesis, items, primary_item_id,
 		 entry_text, exit_text, entry_price, exit_price, kill_price, horizon_text, attention,
 		 eval_window, capital_required, units_used,
-		 per_cycle_gp, per_1h_gp, per_day_gp, roi_pct,
+		 per_cycle_gp, per_1h_gp, per_day_gp, roi_pct, projected_per_1h_gp,
 		 confidence, confidence_why, evidence, invalidation, risks, paper_trade,
 		 state, state_reason, opened_at, closed_at,
 		 buy_window, sell_window, trigger, direction, legs, relation_id, event)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
-		        make_interval(hours => $15),$16,$17,$18,$19,$20,$21,
-		        $22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)`,
+		        make_interval(hours => $15),$16,$17,$18,$19,$20,$21,$22,
+		        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39)`,
 		runID, st.ID, st.Archetype, st.Title, st.Thesis, items, st.PrimaryItemID(),
 		st.Entry, st.Exit, st.EntryPrice, st.ExitPrice, st.KillPrice, st.Horizon, nullIfEmpty(st.Attention),
 		evalWindowHours(st), st.CapitalRequired, st.Size.UnitsUsed,
-		st.ExpectedValue.PerCycleGp, st.ExpectedValue.Per1hGp, st.ExpectedValue.PerDayGp, st.ExpectedValue.RoiPct,
+		st.ExpectedValue.PerCycleGp, st.ExpectedValue.Per1hGp, st.ExpectedValue.PerDayGp, st.ExpectedValue.RoiPct, st.HarnessProjectedPer1h,
 		st.Confidence, st.ConfidenceWhy, st.Evidence, st.Invalidation, risks, st.PaperTrade,
 		state, reason, openedAt, closedAt,
 		marshalOrNil(st.BuyWindow, st.BuyWindow != nil),
@@ -263,6 +268,9 @@ type Strategy struct {
 	Per1hGp       *int64          `json:"per_1h_gp"`
 	PerDayGp      *int64          `json:"per_day_gp"`
 	RoiPct        *float64        `json:"roi_pct"`
+	// ProjectedPer1hGp is the harness's own ship-time projection (null on
+	// legacy rows and non-F kinds); the confirm ratio divides by it when set.
+	ProjectedPer1hGp *int64 `json:"projected_per_1h_gp"`
 	Confidence    string          `json:"confidence"`
 	ConfidenceWhy *string         `json:"confidence_why"`
 	Invalidation  string          `json:"invalidation"`
@@ -291,7 +299,8 @@ const strategyCols = `strategy_id, run_id, sid, archetype, title, thesis, items,
 	confidence, confidence_why, invalidation, risks, paper_trade,
 	state, state_reason, opened_at, closed_at,
 	extract(epoch from eval_window)::float8,
-	buy_window, sell_window, trigger, direction, legs, relation_id, event, triggered_at`
+	buy_window, sell_window, trigger, direction, legs, relation_id, event, triggered_at,
+	projected_per_1h_gp`
 
 func scanStrategy(row pgx.Row) (*Strategy, error) {
 	var st Strategy
@@ -302,7 +311,8 @@ func scanStrategy(row pgx.Row) (*Strategy, error) {
 		&st.PerCycleGp, &st.Per1hGp, &st.PerDayGp, &st.RoiPct,
 		&st.Confidence, &st.ConfidenceWhy, &st.Invalidation, &st.Risks, &st.PaperTrade,
 		&st.State, &st.StateReason, &st.OpenedAt, &st.ClosedAt,
-		&st.EvalWindowS, &buyW, &sellW, &trig, &st.Direction, &legs, &st.RelationID, &event, &st.TriggeredAt)
+		&st.EvalWindowS, &buyW, &sellW, &trig, &st.Direction, &legs, &st.RelationID, &event, &st.TriggeredAt,
+		&st.ProjectedPer1hGp)
 	if err != nil {
 		return nil, err
 	}

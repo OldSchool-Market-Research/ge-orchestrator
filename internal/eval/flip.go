@@ -19,6 +19,36 @@ const (
 	floorBCapacityGp = 100_000
 )
 
+// ProjectFlipPer1h is the harness's own projection of a lane-F strategy at
+// ship time: the same haircut arithmetic computeFlip realizes with (slippage
+// both sides, sell tax, participation-capped units, one 4h cycle), applied
+// to the strategy's own entry/exit offers and the ship-time 30m volume.
+// Stored as strategies.projected_per_1h_gp, it becomes the denominator of
+// the confirm ratio — so realized/projected ≈ 1 for a spread that holds,
+// instead of ~0.12 against the agent's full-cycle claim (the first
+// fortnight's median winner, which made the 0.5 confirm bar unreachable).
+// Returns nil (fall back to the claim) when the inputs can't support a
+// projection. Uses the default participation/slippage constants — the prod
+// evaluator runs defaults; keep them in sync.
+func ProjectFlipPer1h(entry, exit, unitsUsed, vol30m int64) *int64 {
+	if unitsUsed <= 0 || vol30m <= 0 || exit <= entry {
+		return nil
+	}
+	ev := &Evaluator{}
+	capped := ev.haircutUnits(unitsUsed, vol30m*8)
+	perUnit := ev.slipSell(exit) - ev.slipBuy(entry) - sellTax(ev.slipSell(exit))
+	if perUnit <= 0 || capped <= 0 {
+		return nil
+	}
+	v := perUnit * capped / flipCycleHours
+	return &v
+}
+
+// SellTax exposes the schema's tax rule (floor(p/50) capped 5M) to the
+// vetter, which needs the claimed post-tax margin as the persistence-gate
+// reference.
+func SellTax(p int64) int64 { return sellTax(p) }
+
 func (ev *Evaluator) computeFlip(ctx context.Context, st store.Strategy) (store.Evaluation, map[string]bool, error) {
 	now := ev.now()
 	snap, err := ev.source().Snapshot(ctx, st.PrimaryItemID)

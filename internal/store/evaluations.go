@@ -83,11 +83,16 @@ func (s *Store) LastVerdicts(ctx context.Context, strategyID int64, n int) ([]st
 // EvalStats supports the confirmation rule: share of healthy evals + median
 // realized/projected since the given anchor (a V strategy's armed ticks must
 // not count toward its confirmation — pass triggered_at; zero time = all).
+// The denominator is the harness's own ship-time projection when present
+// (migration 009) — realized and projected then share the same haircut
+// arithmetic, so the 0.5 confirm bar is actually reachable; the agent's
+// claim is only the legacy fallback.
 func (s *Store) EvalStats(ctx context.Context, strategyID int64, since time.Time) (total, healthy int, medianRatio *float64, err error) {
 	err = s.Pool.QueryRow(ctx, `SELECT count(*),
 		count(*) FILTER (WHERE verdict='healthy'),
 		(percentile_cont(0.5) WITHIN GROUP (ORDER BY realized_per_1h_gp)
-		 / nullif((SELECT per_1h_gp FROM orchestrator.strategies WHERE strategy_id=$1), 0))::float8
+		 / nullif((SELECT coalesce(projected_per_1h_gp, per_1h_gp)
+		           FROM orchestrator.strategies WHERE strategy_id=$1), 0))::float8
 		FROM orchestrator.evaluations WHERE strategy_id=$1 AND at >= $2`, strategyID, since).
 		Scan(&total, &healthy, &medianRatio)
 	return
@@ -150,7 +155,7 @@ func (s *Store) PnL(ctx context.Context) ([]PnLRow, error) {
 	rows, err := s.Pool.Query(ctx, `SELECT s.strategy_id, s.sid, s.title, s.archetype, s.state,
 		s.opened_at, s.closed_at,
 		greatest(extract(epoch from (coalesce(s.closed_at, now()) - coalesce(s.triggered_at, s.opened_at)))/3600.0, 0)::float8 AS hours,
-		est.med_1h::float8, s.per_1h_gp, s.capital_required
+		est.med_1h::float8, coalesce(s.projected_per_1h_gp, s.per_1h_gp), s.capital_required
 		FROM orchestrator.strategies s
 		JOIN LATERAL (
 			SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY e.realized_per_1h_gp) AS med_1h
@@ -190,4 +195,27 @@ func (s *Store) PnL(ctx context.Context) ([]PnLRow, error) {
 func (s *Store) RecentlyClosed(ctx context.Context, limit int) ([]Strategy, error) {
 	return s.collectStrategies(ctx, `SELECT `+strategyCols+` FROM orchestrator.strategies
 		WHERE state IN ('killed','expired') ORDER BY closed_at DESC LIMIT $1`, limit)
+}
+
+// FlipPersistence24h computes the ship-time persistence gate's inputs for one
+// item against a reference post-tax margin (the strategy's own claimed
+// margin): okHours = hours of the last 24 whose hourly avg post-tax spread
+// held >= 50% of refMargin; obsHours = hours where both sides traded at all.
+// Same statistic, same tax rule (least(floor(high/50), 5M)) as ge-mcp's
+// margin_persistence_24h field, so the number the agent cites and the number
+// the vetter enforces cannot drift apart.
+func (s *Store) FlipPersistence24h(ctx context.Context, itemID int, refMargin int64) (okHours, obsHours int, err error) {
+	err = s.Pool.QueryRow(ctx, `SELECT
+		count(*) FILTER (WHERE h.hi - least(floor(h.hi/50), 5000000) - h.lo >= $2 * 0.5),
+		count(*)
+		FROM (
+			SELECT avg(avg_high_price) FILTER (WHERE high_volume > 0) AS hi,
+			       avg(avg_low_price)  FILTER (WHERE low_volume  > 0) AS lo
+			FROM prices_5m
+			WHERE item_id = $1 AND ts > now() - interval '24 hours'
+			GROUP BY date_trunc('hour', ts)
+		) h
+		WHERE h.hi IS NOT NULL AND h.lo IS NOT NULL`, itemID, refMargin).
+		Scan(&okHours, &obsHours)
+	return
 }

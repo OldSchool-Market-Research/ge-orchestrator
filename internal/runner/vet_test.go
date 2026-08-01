@@ -35,6 +35,24 @@ func TestStopCrossed(t *testing.T) {
 	}
 }
 
+func TestFlipPersistenceVeto(t *testing.T) {
+	// Gate is okHours/24 >= 0.4, i.e. at least 10 of 24 hours.
+	if reason := flipPersistenceVeto(10, 24, 100); reason != "" {
+		t.Errorf("10/24 hours (0.42) should pass, got %q", reason)
+	}
+	if reason := flipPersistenceVeto(9, 24, 100); reason == "" {
+		t.Error("9/24 hours (0.375) should be vetoed")
+	}
+	// Sparse observation does not loosen the gate: 8 persistent hours out of
+	// only 9 observed is still 8/24 of the day.
+	if reason := flipPersistenceVeto(8, 9, 100); reason == "" {
+		t.Error("8 persistent hours (0.33 of the fixed 24) should be vetoed regardless of obs")
+	}
+	if reason := flipPersistenceVeto(0, 0, 100); reason == "" {
+		t.Error("an item with no both-sides history should be vetoed")
+	}
+}
+
 func TestRefPricePrefersHigh(t *testing.T) {
 	high, low := int64(100), int64(90)
 	if got := refPrice(&eval.Snap{High: &high, Low: &low}); got == nil || *got != high {
