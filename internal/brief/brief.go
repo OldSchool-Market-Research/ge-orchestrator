@@ -41,11 +41,18 @@ func Defaults() Params {
 	return Params{
 		// The operator runs a research engine on a 50M budget: the engine
 		// surfaces and paper-proves every option worth running at that scale;
-		// the operator picks. F/B flip lanes are primary; V/U opportunistic;
-		// S/H retired (0% confirmed at this data age); C inert (no relations
-		// table in prod).
+		// the operator picks. F is primary; V/U opportunistic; S/H retired
+		// (0% confirmed at this data age); C inert (no relations table in
+		// prod). B is OFF (weight 0, vet-enforced) on its first-fortnight
+		// record: 3/33 winners, -67.5M realized, and still -21.6M in the
+		// most generous counterfactual (every position sold at its last
+		// observed high leg) — bad selection AND bad structure (2% tax +
+		// slippage needs >3% appreciation on a 10-50M item). A high-value
+		// lane may return as a re-specced quick-arb (roundtrips-gated,
+		// spread-capture eval), not as the mid-marked multi-day hold this
+		// lane actually was.
 		CapitalGp: 50_000_000, Risk: "low", MinConfidence: "medium",
-		Archetypes: map[string]float64{"F": 1.5, "B": 1.2, "V": 0.5, "U": 0.5},
+		Archetypes: map[string]float64{"F": 1.5, "B": 0, "V": 0.5, "U": 0.5},
 		// The operator's own two screens, in their words: they ARE the vflip
 		// and hvflip sweep lenses. The bar for shipping a flip: margin real
 		// (fresh), persistent (reappears across the day), fillable (volume
@@ -169,18 +176,23 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 		}
 	}
 
-	closedList, err := s.RecentlyClosed(ctx, 8)
+	closedList, err := s.RecentlyClosed(ctx, 12)
 	if err != nil {
 		return "", err
 	}
 	if len(closedList) > 0 {
 		b.WriteString("\n### Recently killed/expired (do not re-pitch without materially new evidence)\n")
+		b.WriteString("How long each survived is the lesson: a kill inside a couple of hours means the pitched margin was a spike, not a standing spread.\n")
 		for _, st := range closedList {
 			reason := ""
 			if st.StateReason != nil {
 				reason = *st.StateReason
 			}
-			fmt.Fprintf(&b, "- %s [%s] %s: %s\n", st.Title, st.Archetype, st.State, reason)
+			line := fmt.Sprintf("- %s [%s, item_id %d] %s", st.Sid, st.Archetype, st.PrimaryItemID, st.State)
+			if st.ClosedAt != nil {
+				line += fmt.Sprintf(" after %.1fh", st.ClosedAt.Sub(st.OpenedAt).Hours())
+			}
+			fmt.Fprintf(&b, "%s: %s\n", line, reason)
 		}
 	}
 

@@ -393,3 +393,29 @@ func TestPolicyPerKind(t *testing.T) {
 		t.Fatalf("S policy wrong: %+v", p)
 	}
 }
+
+func TestProjectFlipPer1h(t *testing.T) {
+	// entry 900, exit 1000: slipSell(1000)=995, slipBuy(900)=904,
+	// tax(995)=19 -> perUnit 72; vol30m 4000 -> 15% of 32000 = 4800 caps
+	// nothing below it, units 1000 -> 72*1000/4 = 18000 per hour.
+	got := ProjectFlipPer1h(900, 1000, 1000, 4000)
+	if got == nil || *got != 18000 {
+		t.Fatalf("ProjectFlipPer1h(900,1000,1000,4000) = %v, want 18000", got)
+	}
+	// Participation cap binds: units 10000 vs 4800 fillable -> 72*4800/4.
+	got = ProjectFlipPer1h(900, 1000, 10000, 4000)
+	if got == nil || *got != 72*4800/4 {
+		t.Fatalf("participation-capped projection = %v, want %d", got, 72*4800/4)
+	}
+	// Degenerate inputs fall back to nil (the agent's claim stays the
+	// denominator rather than storing a nonsense projection).
+	if ProjectFlipPer1h(1000, 900, 1000, 4000) != nil {
+		t.Error("inverted spread should project nil")
+	}
+	if ProjectFlipPer1h(900, 1000, 0, 4000) != nil {
+		t.Error("zero units should project nil")
+	}
+	if ProjectFlipPer1h(900, 905, 1000, 4000) != nil {
+		t.Error("spread eaten by slippage+tax should project nil")
+	}
+}
