@@ -15,7 +15,7 @@ import (
 const (
 	freshMaxAgeSFlip = 3600 // both legs within 60 min — flip markets print constantly
 	flipCycleHours   = 4    // F: one buy-limit cycle
-	floorFCapacityGp = 200_000
+	floorFCapacityGp = 400_000
 	floorBCapacityGp = 100_000
 )
 
