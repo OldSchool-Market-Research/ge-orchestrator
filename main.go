@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/osrs-ge/ge-orchestrator/internal/brief"
 	"github.com/osrs-ge/ge-orchestrator/internal/collect"
 	"github.com/osrs-ge/ge-orchestrator/internal/eval"
+	"github.com/osrs-ge/ge-orchestrator/internal/notify"
 	"github.com/osrs-ge/ge-orchestrator/internal/runner"
 	"github.com/osrs-ge/ge-orchestrator/internal/store"
 )
@@ -43,6 +45,19 @@ func main() {
 	if apiKey == "" {
 		apiKey = keyFromDotEnv(".env", "minimax")
 	}
+	// Operator ping: fires only for ships that clear the standing
+	// "worth my time" bar. No URL = silent.
+	var notifier *notify.Notifier
+	if url := os.Getenv("GE_ORCH_NTFY_URL"); url != "" {
+		notifier = notify.New(notify.Config{
+			URL:              url,
+			MinPer1hGp:       int64Env("GE_ORCH_NOTIFY_MIN_GPHR", 250_000),
+			MaxChecksPerHour: floatEnv("GE_ORCH_NOTIFY_MAX_CHECKS_PER_HR", 2),
+		})
+		log.Printf("notify: ntfy %s (>= %d gp/hr at <= %.1f checks/hr)",
+			url, notifier.Cfg.MinPer1hGp, notifier.Cfg.MaxChecksPerHour)
+	}
+
 	r := &runner.Runner{
 		Cfg: runner.Config{
 			AgentPath: mustEnv("GE_AGENT_PATH"),
@@ -55,6 +70,7 @@ func main() {
 		Store:  st,
 		Hub:    runner.NewHub(),
 		Prices: eval.NewPgSource(st.Pool),
+		Notify: notifier,
 	}
 	ev := &eval.Evaluator{Store: st}
 
@@ -193,6 +209,26 @@ func mustEnv(key string) string {
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func int64Env(key string, def int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
+		}
+		log.Fatalf("%s: bad integer %q", key, v)
+	}
+	return def
+}
+
+func floatEnv(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+		log.Fatalf("%s: bad number %q", key, v)
 	}
 	return def
 }
