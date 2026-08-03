@@ -41,18 +41,19 @@ func Defaults() Params {
 	return Params{
 		// The operator runs a research engine on a 50M budget: the engine
 		// surfaces and paper-proves every option worth running at that scale;
-		// the operator picks. F is primary; V/U opportunistic; S/H retired
-		// (0% confirmed at this data age); C inert (no relations table in
-		// prod). B is OFF (weight 0, vet-enforced) on its first-fortnight
-		// record: 3/33 winners, -67.5M realized, and still -21.6M in the
-		// most generous counterfactual (every position sold at its last
-		// observed high leg) — bad selection AND bad structure (2% tax +
-		// slippage needs >3% appreciation on a 10-50M item). A high-value
-		// lane may return as a re-specced quick-arb (roundtrips-gated,
-		// spread-capture eval), not as the mid-marked multi-day hold this
-		// lane actually was.
+		// the operator picks. F is primary; C is the repeat-on-your-own-time
+		// lane (decants/sets/combines vs the item_relations table — the agent
+		// notes-and-moves-on if the table is absent); V/U opportunistic; S/H
+		// retired (0% confirmed at this data age). B is OFF (weight 0,
+		// vet-enforced) on its first-fortnight record: 3/33 winners, -67.5M
+		// realized, and still -21.6M in the most generous counterfactual
+		// (every position sold at its last observed high leg) — bad selection
+		// AND bad structure (2% tax + slippage needs >3% appreciation on a
+		// 10-50M item). A high-value lane may return as a re-specced quick-arb
+		// (roundtrips-gated, spread-capture eval), not as the mid-marked
+		// multi-day hold this lane actually was.
 		CapitalGp: 50_000_000, Risk: "low", MinConfidence: "medium",
-		Archetypes: map[string]float64{"F": 1.5, "B": 0, "V": 0.5, "U": 0.5},
+		Archetypes: map[string]float64{"F": 1.5, "B": 0, "V": 0.5, "C": 1, "U": 0.5},
 		// The operator's own two screens, in their words: they ARE the vflip
 		// and hvflip sweep lenses. The bar for shipping a flip: margin real
 		// (fresh), persistent (reappears across the day), fillable (volume
@@ -117,7 +118,7 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 		b.WriteString("\n")
 	}
 	b.WriteString("- Objective: rank ALL viable options by absolute post-tax gp/day at fillable size. The floor is absolute (F: 400k gp/cycle = 100k gp/hr, B: 100k/cycle) — dismiss below-floor candidates whatever their ROI%. Shipping NOTHING is a legitimate outcome when nothing clears the bar.\n")
-	b.WriteString("- Every F/B strategy must state its attention contract (offer cadence, longest safe unattended window, reaction risk) — the operator decides what fits their day.\n")
+	b.WriteString("- Every F/B/C strategy must state its attention contract (offer cadence, longest safe unattended window, reaction risk) — the operator decides what fits their day.\n")
 
 	writeOpenBook(ctx, &b, s, p)
 	writeWatchlist(ctx, &b, s)
