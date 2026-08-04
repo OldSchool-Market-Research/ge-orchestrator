@@ -41,7 +41,39 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/brief/preview", s.briefPreview)
 	mux.HandleFunc("GET /api/signals", s.listSignals)
 	mux.HandleFunc("GET /api/trends", s.listTrends)
+	mux.HandleFunc("GET /api/calibration", s.calibration)
 	return mux
+}
+
+// calibration serves the learning chart (docs/FEEDBACK-LOOP.md §4): the
+// latest factors per archetype, their history, and the failure-mode digest
+// over the same trailing window. ?days bounds the history (default 30).
+func (s *Server) calibration(w http.ResponseWriter, r *http.Request) {
+	days := 30
+	if d := r.URL.Query().Get("days"); d != "" {
+		n, err := strconv.Atoi(d)
+		if err != nil || n < 1 || n > 365 {
+			writeErr(w, 400, "days must be 1..365")
+			return
+		}
+		days = n
+	}
+	latest, err := s.Store.CalibrationLatest(r.Context())
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	history, err := s.Store.CalibrationHistory(r.Context(), days)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	modes, err := s.Store.FailureModeCounts(r.Context(), days)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"latest": latest, "history": history, "failure_modes": modes})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
