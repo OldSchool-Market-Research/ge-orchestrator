@@ -18,6 +18,7 @@ import (
 
 	"github.com/osrs-ge/ge-orchestrator/internal/brief"
 	"github.com/osrs-ge/ge-orchestrator/internal/eval"
+	"github.com/osrs-ge/ge-orchestrator/internal/notify"
 	"github.com/osrs-ge/ge-orchestrator/internal/store"
 )
 
@@ -36,6 +37,7 @@ type Runner struct {
 	Store  *store.Store
 	Hub    *Hub
 	Prices eval.PriceSource // ship-time vetting; nil skips the kill-price rule
+	Notify *notify.Notifier // operator ping on above-bar ships; nil disables
 
 	mu     sync.Mutex
 	active *activeRun
@@ -211,6 +213,11 @@ func (r *Runner) ingest(ctx context.Context, runID int64, p brief.Params, worksp
 	}
 	if err := r.Store.InsertStrategies(ctx, runID, now, accepted, vetoed); err != nil {
 		return err
+	}
+	if r.Notify != nil {
+		for _, st := range accepted {
+			r.Notify.StrategyShipped(ctx, st)
+		}
 	}
 	// Apply the run's verdicts on its assigned signals, then return any it
 	// ignored to the queue (a verdict-less signal must not rot as 'assigned').

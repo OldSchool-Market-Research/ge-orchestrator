@@ -52,6 +52,13 @@ type SignalVerdict struct {
 	Reason   string `json:"reason"`
 }
 
+// AttentionSpec mirrors ge-agent's structured F/B attention contract: the
+// prose attention field as two gateable numbers.
+type AttentionSpec struct {
+	ChecksPerHour      float64 `json:"checks_per_hour"`      // GE visits per hour while running
+	MaxUnattendedHours float64 `json:"max_unattended_hours"` // longest safe unattended window
+}
+
 // SidecarStrategy mirrors ge-agent's internal/strategy.Strategy JSON shape.
 type SidecarStrategy struct {
 	ID        string `json:"id"`
@@ -69,9 +76,10 @@ type SidecarStrategy struct {
 	EntryPrice      int64  `json:"entry_price"`
 	ExitPrice       int64  `json:"exit_price"`
 	KillPrice       *int64 `json:"kill_price"`
-	Horizon         string `json:"horizon"`
-	Attention       string `json:"attention,omitempty"` // F/B execution contract
-	CapitalRequired int64  `json:"capital_required"`
+	Horizon         string         `json:"horizon"`
+	Attention       string         `json:"attention,omitempty"`      // F/B execution contract
+	AttentionSpec   *AttentionSpec `json:"attention_spec,omitempty"` // F/B contract as numbers (agent >= 0.7.0)
+	CapitalRequired int64          `json:"capital_required"`
 	Size            struct {
 		BuyLimit       int64 `json:"buy_limit"`
 		VolConstrained int64 `json:"vol_constrained"`
@@ -204,10 +212,11 @@ func insertStrategy(ctx context.Context, tx pgx.Tx, runID int64, openedAt time.T
 		 per_cycle_gp, per_1h_gp, per_day_gp, roi_pct, projected_per_1h_gp,
 		 confidence, confidence_why, evidence, invalidation, risks, paper_trade,
 		 state, state_reason, opened_at, closed_at,
-		 buy_window, sell_window, trigger, direction, legs, relation_id, event)
+		 buy_window, sell_window, trigger, direction, legs, relation_id, event,
+		 attention_spec)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
 		        make_interval(hours => $15),$16,$17,$18,$19,$20,$21,$22,
-		        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39)`,
+		        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40)`,
 		runID, st.ID, st.Archetype, st.Title, st.Thesis, items, st.PrimaryItemID(),
 		st.Entry, st.Exit, st.EntryPrice, st.ExitPrice, st.KillPrice, st.Horizon, nullIfEmpty(st.Attention),
 		evalWindowHours(st), st.CapitalRequired, st.Size.UnitsUsed,
@@ -221,6 +230,7 @@ func insertStrategy(ctx context.Context, tx pgx.Tx, runID int64, openedAt time.T
 		marshalOrNil(st.Legs, len(st.Legs) > 0),
 		st.RelationID,
 		marshalOrNil(st.Event, st.Event != nil),
+		marshalOrNil(st.AttentionSpec, st.AttentionSpec != nil),
 	); err != nil {
 		return fmt.Errorf("insert strategy %s: %w", st.ID, err)
 	}
@@ -262,6 +272,7 @@ type Strategy struct {
 	KillPrice     *int64          `json:"kill_price"`
 	HorizonText   string          `json:"horizon"`
 	Attention     *string         `json:"attention,omitempty"`
+	AttentionSpec *AttentionSpec  `json:"attention_spec,omitempty"`
 	Capital       *int64          `json:"capital_required"`
 	UnitsUsed     *int64          `json:"units_used"`
 	PerCycleGp    *int64          `json:"per_cycle_gp"`
@@ -300,11 +311,11 @@ const strategyCols = `strategy_id, run_id, sid, archetype, title, thesis, items,
 	state, state_reason, opened_at, closed_at,
 	extract(epoch from eval_window)::float8,
 	buy_window, sell_window, trigger, direction, legs, relation_id, event, triggered_at,
-	projected_per_1h_gp`
+	projected_per_1h_gp, attention_spec`
 
 func scanStrategy(row pgx.Row) (*Strategy, error) {
 	var st Strategy
-	var buyW, sellW, trig, legs, event []byte
+	var buyW, sellW, trig, legs, event, attnSpec []byte
 	err := row.Scan(&st.StrategyID, &st.RunID, &st.Sid, &st.Archetype, &st.Title, &st.Thesis,
 		&st.Items, &st.PrimaryItemID, &st.EntryText, &st.ExitText, &st.EntryPrice, &st.ExitPrice,
 		&st.KillPrice, &st.HorizonText, &st.Attention, &st.Capital, &st.UnitsUsed,
@@ -312,14 +323,14 @@ func scanStrategy(row pgx.Row) (*Strategy, error) {
 		&st.Confidence, &st.ConfidenceWhy, &st.Invalidation, &st.Risks, &st.PaperTrade,
 		&st.State, &st.StateReason, &st.OpenedAt, &st.ClosedAt,
 		&st.EvalWindowS, &buyW, &sellW, &trig, &st.Direction, &legs, &st.RelationID, &event, &st.TriggeredAt,
-		&st.ProjectedPer1hGp)
+		&st.ProjectedPer1hGp, &attnSpec)
 	if err != nil {
 		return nil, err
 	}
 	st.EvalWindow = time.Duration(st.EvalWindowS * float64(time.Second))
 	for raw, target := range map[*[]byte]any{
 		&buyW: &st.BuyWindow, &sellW: &st.SellWindow, &trig: &st.Trigger,
-		&legs: &st.Legs, &event: &st.Event,
+		&legs: &st.Legs, &event: &st.Event, &attnSpec: &st.AttentionSpec,
 	} {
 		if len(*raw) > 0 {
 			if err := json.Unmarshal(*raw, target); err != nil {
