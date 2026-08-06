@@ -95,7 +95,10 @@ func main() {
 	collectEvery := durEnv("GE_ORCH_COLLECT_INTERVAL", time.Hour)
 	signalCooldown := durEnv("GE_ORCH_SIGNAL_COOLDOWN", 30*time.Minute)
 	if collectEvery > 0 {
-		col := &collect.Collector{Store: st}
+		col := &collect.Collector{Store: st, Cfg: collect.Config{
+			// Negative (e.g. -1h) disables dismissal memory; unset means 48h.
+			DismissCooldown: durEnv("GE_ORCH_SIGNAL_DISMISS_COOLDOWN", 0),
+		}}
 		go func() {
 			// One sweep shortly after boot so a fresh install has trends/signals.
 			time.Sleep(30 * time.Second)

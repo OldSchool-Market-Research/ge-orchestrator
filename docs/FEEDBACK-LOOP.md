@@ -152,6 +152,30 @@ once C makes confirms possible. Add the negative mirror (migration 013):
   the brief's "validated-good ideas" line shows *what running it was actually
   worth per hour of Jade's attention*, not just that it confirmed.
 
+### E. Dismissal memory — falsifications must outlive the run
+
+Measured 2026-08-06: over 7 days, 2,031 signal dismissals vs 15
+investigations, and 3,191 re-queues of 284 distinct (kind, item) pairs
+within 48h of a dismissal. The agent's falsifications are recorded
+(`signals.reason`) and then never consulted — most agent turns re-litigate
+candidates the record already killed.
+
+Two mechanisms, both zero-LLM:
+
+- **Cooldown at queue time**: `UpsertSignal` skips a (kind, item) dismissed
+  within `GE_ORCH_SIGNAL_DISMISS_COOLDOWN` (default 48h; negative disables).
+  Watch-revalidation signals are exempt — re-proving is that lens's job.
+- **Obituary at re-entry**: when a candidate does re-enter after cooldown,
+  its brief line carries the prior falsification ("previously dismissed
+  08-05: margin was a spike — persistence 0.08"), so the run starts from the
+  verdict instead of re-deriving it.
+
+The cooldown is deliberately dumb for now (no "unless metrics moved
+materially" bypass): the collector's lenses re-detect on current data every
+hour, so a genuinely changed market re-queues the moment the cooldown lapses.
+If 48h proves too sticky for real regime changes, add a metric-delta bypass
+then — with the re-queue stats above as the before/after.
+
 ## 4. What "making gp" means here
 
 The system never trades; Jade does. The loop's terminal metric is therefore

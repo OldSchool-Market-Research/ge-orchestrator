@@ -28,18 +28,49 @@ type Signal struct {
 // UpsertSignal queues a detection. A live (pending/assigned) signal for the
 // same (kind, item) just gets its metrics refreshed — detections don't stack.
 // Returns true when a NEW pending signal was created.
-func (s *Store) UpsertSignal(ctx context.Context, kind string, itemID int, itemName string, metrics any) (bool, error) {
+//
+// dismissCooldown is the dismissal-memory guard (docs/FEEDBACK-LOOP.md §3E):
+// a (kind, item) dismissed within the cooldown is not re-queued — the
+// falsification that killed it is assumed to still hold. Zero disables the
+// guard (watch revalidation passes 0: re-proving is that lens's whole job).
+// The guard suppresses the metrics refresh of an already-live signal in the
+// rare deploy-transition case where a live row coexists with a recent
+// dismissal; that refresh is cosmetic, so the simpler SQL wins.
+func (s *Store) UpsertSignal(ctx context.Context, kind string, itemID int, itemName string, metrics any, dismissCooldown time.Duration) (bool, error) {
 	m, err := json.Marshal(metrics)
 	if err != nil {
 		return false, err
 	}
 	var inserted bool
 	err = s.Pool.QueryRow(ctx, `INSERT INTO orchestrator.signals (kind, item_id, item_name, metrics)
-		VALUES ($1,$2,$3,$4)
+		SELECT $1,$2,$3,$4
+		WHERE $5::interval = '0'::interval OR NOT EXISTS (
+			SELECT 1 FROM orchestrator.signals
+			WHERE kind=$1 AND item_id=$2 AND status='dismissed'
+			  AND resolved_at > now() - $5::interval)
 		ON CONFLICT (kind, item_id) WHERE status IN ('pending','assigned')
 		DO UPDATE SET metrics = EXCLUDED.metrics
-		RETURNING (xmax = 0)`, kind, itemID, itemName, m).Scan(&inserted)
+		RETURNING (xmax = 0)`, kind, itemID, itemName, m, dismissCooldown.String()).Scan(&inserted)
+	if err == pgx.ErrNoRows {
+		return false, nil // cooldown-suppressed: recently dismissed, not re-queued
+	}
 	return inserted, err
+}
+
+// LatestDismissal returns when a (kind, item) was last dismissed and the
+// recorded falsification, or nils if it never was. The brief attaches this to
+// re-entered candidates so a run starts from the prior verdict instead of
+// re-deriving it.
+func (s *Store) LatestDismissal(ctx context.Context, kind string, itemID int) (*time.Time, *string, error) {
+	var at *time.Time
+	var reason *string
+	err := s.Pool.QueryRow(ctx, `SELECT resolved_at, reason FROM orchestrator.signals
+		WHERE kind=$1 AND item_id=$2 AND status='dismissed'
+		ORDER BY resolved_at DESC LIMIT 1`, kind, itemID).Scan(&at, &reason)
+	if err == pgx.ErrNoRows {
+		return nil, nil, nil
+	}
+	return at, reason, err
 }
 
 // PendingSignals returns the oldest pending signals up to limit.
