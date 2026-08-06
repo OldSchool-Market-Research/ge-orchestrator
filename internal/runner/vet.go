@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/osrs-ge/ge-orchestrator/internal/brief"
 	"github.com/osrs-ge/ge-orchestrator/internal/eval"
@@ -61,11 +62,24 @@ const (
 // (eval.ProjectFlipPer1h -> strategies.projected_per_1h_gp), which becomes
 // the confirm-ratio denominator (migration 009).
 //
+// Since the calibration release two record-fed rules join the list:
+//
+//  6. graveyard (docs/FEEDBACK-LOOP.md §3D) — the item×archetype pair has
+//     >= 3 kills and net-negative realized in the trailing 30d, and the last
+//     kill is inside the cooldown. A different archetype on the same item
+//     passes: a materially new signal class is the designed escape hatch.
+//  7. calibrated floor (§3A) — factor × claimed per-cycle gp must still
+//     clear the lane floor. Runs in log-only mode until
+//     GE_ORCH_CAL_VETO_MODE=enforce, so the first week measures how many
+//     ships it WOULD kill before it kills any.
+//
 // Vet errors fail open (accept + log): a flaky price lookup must not turn
-// into a dropped research run.
+// into a dropped research run. The same applies to the record-fed rules — a
+// missing calibration table or graveyard query error just skips that rule.
 func (r *Runner) vet(ctx context.Context, p brief.Params, list []store.SidecarStrategy) (accepted []store.SidecarStrategy, vetoed []store.Vetoed) {
+	rec := r.loadRecord(ctx)
 	for _, st := range list {
-		reason, proj := r.vetOne(ctx, p, st)
+		reason, proj := r.vetOne(ctx, p, st, rec)
 		if reason != "" {
 			vetoed = append(vetoed, store.Vetoed{Strategy: st, Reason: reason})
 			continue
@@ -76,7 +90,54 @@ func (r *Runner) vet(ctx context.Context, p brief.Params, list []store.SidecarSt
 	return accepted, vetoed
 }
 
-func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStrategy) (string, *int64) {
+// record is the paper record's contribution to one ingest's vetting: the
+// latest calibration factor per archetype and the current graveyard, fetched
+// once per run, nil-safe throughout.
+type record struct {
+	factors map[string]float64
+	grave   map[graveKey]store.GraveyardRow
+}
+
+type graveKey struct {
+	itemID    int
+	archetype string
+}
+
+// Factor returns the archetype's calibration factor, or 1 (no correction)
+// when none has been computed — absence of measurement must not veto.
+func (rec *record) Factor(archetype string) float64 {
+	if rec == nil || rec.factors == nil {
+		return 1
+	}
+	f, ok := rec.factors[archetype]
+	if !ok || f <= 0 {
+		return 1
+	}
+	return f
+}
+
+func (r *Runner) loadRecord(ctx context.Context) *record {
+	rec := &record{}
+	if cal, err := r.Store.CalibrationLatest(ctx); err != nil {
+		log.Printf("vet: calibration lookup: %v", err)
+	} else {
+		rec.factors = make(map[string]float64, len(cal))
+		for _, row := range cal {
+			rec.factors[row.Archetype] = row.Factor
+		}
+	}
+	if grave, err := r.Store.Graveyard(ctx); err != nil {
+		log.Printf("vet: graveyard lookup: %v", err)
+	} else {
+		rec.grave = make(map[graveKey]store.GraveyardRow, len(grave))
+		for _, g := range grave {
+			rec.grave[graveKey{g.ItemID, g.Archetype}] = g
+		}
+	}
+	return rec
+}
+
+func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStrategy, rec *record) (string, *int64) {
 	if len(st.Items) == 0 {
 		return "", nil // InsertStrategies rejects the whole sidecar with a real error
 	}
@@ -90,6 +151,12 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 		log.Printf("vet %s: dedup lookup: %v", st.ID, err)
 	} else if dup {
 		return fmt.Sprintf("vetoed at ship time: item %d already has an open %s strategy", itemID, st.Archetype), nil
+	}
+
+	if g, ok := rec.graveEntry(itemID, st.Archetype); ok {
+		if reason := graveyardVeto(g, r.Cfg.GraveyardCooldown, time.Now().UTC()); reason != "" {
+			return reason, nil
+		}
 	}
 
 	var snap *eval.Snap
@@ -131,6 +198,14 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 		return reason, nil
 	}
 
+	if reason := calibratedFloorVeto(st, rec.Factor(st.Archetype)); reason != "" {
+		if r.Cfg.CalVetoEnforce {
+			return reason, nil
+		}
+		// Log-only week: count what the rule WOULD kill before letting it.
+		log.Printf("vet %s: would veto (cal-floor log-only): %s", st.ID, reason)
+	}
+
 	if st.Archetype == "F" {
 		// The gate's reference is the strategy's OWN claimed post-tax margin
 		// (schema tax rule via eval.SellTax) — the claim being tested, and
@@ -151,6 +226,49 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 		proj = eval.ProjectFlipPer1h(st.EntryPrice, st.ExitPrice, st.Size.UnitsUsed, snap.Vol30m)
 	}
 	return "", proj
+}
+
+// graveEntry looks up the graveyard row for an item×archetype, nil-safe.
+func (rec *record) graveEntry(itemID int, archetype string) (store.GraveyardRow, bool) {
+	if rec == nil || rec.grave == nil {
+		return store.GraveyardRow{}, false
+	}
+	g, ok := rec.grave[graveKey{itemID, archetype}]
+	return g, ok
+}
+
+// graveyardVeto rejects a graveyarded item×archetype while its last kill is
+// inside the cooldown. Expiry is automatic: past the cooldown the pair may
+// be pitched again (and the trailing window eventually drops it entirely).
+func graveyardVeto(g store.GraveyardRow, cooldown time.Duration, now time.Time) string {
+	if cooldown <= 0 || now.Sub(g.LastKilledAt) >= cooldown {
+		return ""
+	}
+	return fmt.Sprintf("vetoed at ship time: item %d [%s] is graveyarded — %d kills, %d gp realized in the trailing %dd, last killed %s (cooldown %s; a materially new signal class means a different archetype)",
+		g.ItemID, g.Archetype, g.Kills, g.EstRealizedGp, store.GraveyardWindowDays,
+		g.LastKilledAt.Format("2006-01-02"), cooldown)
+}
+
+// calibratedFloorVeto applies the record's correction to the claim before
+// the lane floor (docs/FEEDBACK-LOOP.md §3A): factor × claimed per-cycle gp
+// must still clear it. factor 1 (no measurement) makes this a no-op beyond
+// the raw floor check that already ran.
+func calibratedFloorVeto(st store.SidecarStrategy, factor float64) string {
+	var floor int64
+	switch st.Archetype {
+	case "F":
+		floor = floorFPerCycleGp
+	case "B":
+		floor = floorBPerCycleGp
+	default:
+		return ""
+	}
+	calibrated := int64(factor * float64(st.ExpectedValue.PerCycleGp))
+	if calibrated >= floor {
+		return ""
+	}
+	return fmt.Sprintf("vetoed at ship time: calibrated per_cycle_gp %d (factor %.2f x claimed %d) below the %d lane-%s floor",
+		calibrated, factor, st.ExpectedValue.PerCycleGp, floor, st.Archetype)
 }
 
 // flipPersistenceVeto applies the lane-F persistence gate. okHours comes from

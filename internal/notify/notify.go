@@ -35,13 +35,20 @@ func New(cfg Config) *Notifier {
 
 // Clears applies the operator bar to one accepted strategy and returns the
 // gp/hr figure the decision used: the harness's own ship-time projection
-// when the vetter computed one, else the agent's claim. Kinds without an
-// attention contract (V/C/U) never ping — the bar is about fitting flips
-// into the operator's day, and those kinds carry no cadence to judge.
-func (n *Notifier) Clears(st store.SidecarStrategy) (int64, bool) {
+// when the vetter computed one (else the agent's claim), weighted by the
+// archetype's calibration factor. The record says raw projections run ~10x
+// hot — an uncalibrated ping is exactly the noise that trains the operator
+// to mute the topic. factor <= 0 or 1 means no measurement / no correction.
+// Kinds without an attention contract (V/C/U) never ping — the bar is about
+// fitting flips into the operator's day, and those kinds carry no cadence
+// to judge.
+func (n *Notifier) Clears(st store.SidecarStrategy, factor float64) (int64, bool) {
 	per1h := st.ExpectedValue.Per1hGp
 	if st.HarnessProjectedPer1h != nil {
 		per1h = *st.HarnessProjectedPer1h
+	}
+	if factor > 0 {
+		per1h = int64(factor * float64(per1h))
 	}
 	if st.AttentionSpec == nil || st.AttentionSpec.ChecksPerHour > n.Cfg.MaxChecksPerHour {
 		return per1h, false
@@ -51,8 +58,8 @@ func (n *Notifier) Clears(st store.SidecarStrategy) (int64, bool) {
 
 // StrategyShipped pings for one accepted strategy if it clears the bar.
 // Failures are logged, never returned — a ping must not fail an ingest.
-func (n *Notifier) StrategyShipped(ctx context.Context, st store.SidecarStrategy) {
-	per1h, ok := n.Clears(st)
+func (n *Notifier) StrategyShipped(ctx context.Context, st store.SidecarStrategy, factor float64) {
+	per1h, ok := n.Clears(st, factor)
 	if !ok || n.Cfg.URL == "" {
 		return
 	}
@@ -94,7 +101,7 @@ func format(st store.SidecarStrategy, per1h int64) (title, body string) {
 		lines = append(lines, fmt.Sprintf("attention: %.1f checks/hr, safe unattended %.0fh",
 			st.AttentionSpec.ChecksPerHour, st.AttentionSpec.MaxUnattendedHours))
 	}
-	lines = append(lines, fmt.Sprintf("claim %s gp/hr, projected %s gp/hr", gp(st.ExpectedValue.Per1hGp), gp(per1h)))
+	lines = append(lines, fmt.Sprintf("claim %s gp/hr, calibrated %s gp/hr", gp(st.ExpectedValue.Per1hGp), gp(per1h)))
 	return title, strings.Join(lines, "\n")
 }
 

@@ -58,6 +58,13 @@ func main() {
 			url, notifier.Cfg.MinPer1hGp, notifier.Cfg.MaxChecksPerHour)
 	}
 
+	calVetoMode := getenv("GE_ORCH_CAL_VETO_MODE", "log")
+	if calVetoMode != "log" && calVetoMode != "enforce" {
+		log.Fatalf("GE_ORCH_CAL_VETO_MODE: %q (want log|enforce)", calVetoMode)
+	}
+	graveyardCooldown := durEnv("GE_ORCH_GRAVEYARD_COOLDOWN", 14*24*time.Hour)
+	log.Printf("vet: calibrated floor %s, graveyard cooldown %s", calVetoMode, graveyardCooldown)
+
 	r := &runner.Runner{
 		Cfg: runner.Config{
 			AgentPath: mustEnv("GE_AGENT_PATH"),
@@ -66,6 +73,9 @@ func main() {
 			APIKey:    apiKey,
 			Directive: mustEnv("GE_AGENT_DIRECTIVE"),
 			StateDir:  getenv("GE_ORCH_STATE", "state"),
+
+			CalVetoEnforce:    calVetoMode == "enforce",
+			GraveyardCooldown: graveyardCooldown,
 		},
 		Store:  st,
 		Hub:    runner.NewHub(),

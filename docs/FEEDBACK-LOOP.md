@@ -210,5 +210,7 @@ baseline; each phase gets its own before/after on the /api/calibration chart.
 1. Survival threshold for `P(survive)`: 6h is proposed (past the 3-tick kill
    zone, short of expiry). Gut-check against how long a thesis "should" live.
 2. Should the calibrated floor veto (phase 2) start in log-only mode for a few
-   days ("would have vetoed N") before enforcing?
+   days ("would have vetoed N") before enforcing? — *Resolved: yes. It ships
+   as `GE_ORCH_CAL_VETO_MODE=log` (default); flipping to `enforce` is a
+   config change once the "would veto" lines size the rule.*
 3. Graveyard cooldown 14d — too long for a market this fast?
