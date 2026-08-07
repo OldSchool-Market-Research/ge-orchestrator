@@ -41,20 +41,26 @@ func TestClears(t *testing.T) {
 	cases := []struct {
 		name     string
 		st       store.SidecarStrategy
+		factor   float64
 		wantPer  int64
 		wantPing bool
 	}{
-		{"clears on claim", fixture(300_000, nil, lowTouch), 300_000, true},
-		{"below floor", fixture(100_000, nil, lowTouch), 100_000, false},
-		{"projection outranks claim", fixture(900_000, proj(120_000), lowTouch), 120_000, false},
-		{"projection clears", fixture(100_000, proj(400_000), lowTouch), 400_000, true},
-		{"too many checks", fixture(900_000, nil, busy), 900_000, false},
-		{"no spec never pings", fixture(900_000, nil, nil), 900_000, false},
-		{"exactly at both bounds", fixture(250_000, nil, &store.AttentionSpec{ChecksPerHour: 2, MaxUnattendedHours: 4}), 250_000, true},
+		{"clears on claim", fixture(300_000, nil, lowTouch), 1, 300_000, true},
+		{"below floor", fixture(100_000, nil, lowTouch), 1, 100_000, false},
+		{"projection outranks claim", fixture(900_000, proj(120_000), lowTouch), 1, 120_000, false},
+		{"projection clears", fixture(100_000, proj(400_000), lowTouch), 1, 400_000, true},
+		{"too many checks", fixture(900_000, nil, busy), 1, 900_000, false},
+		{"no spec never pings", fixture(900_000, nil, nil), 1, 900_000, false},
+		{"exactly at both bounds", fixture(250_000, nil, &store.AttentionSpec{ChecksPerHour: 2, MaxUnattendedHours: 4}), 1, 250_000, true},
+		// Calibration: the record's factor deflates the projection before the
+		// gate — a 900k raw projection at factor 0.2 is a 180k ping-worthiness.
+		{"factor silences a hot projection", fixture(100_000, proj(900_000), lowTouch), 0.2, 180_000, false},
+		{"factor-deflated but still worth it", fixture(100_000, proj(2_000_000), lowTouch), 0.2, 400_000, true},
+		{"factor 0 means unmeasured, no correction", fixture(300_000, nil, lowTouch), 0, 300_000, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			per, ok := n.Clears(c.st)
+			per, ok := n.Clears(c.st, c.factor)
 			if per != c.wantPer || ok != c.wantPing {
 				t.Fatalf("Clears = (%d, %v), want (%d, %v)", per, ok, c.wantPer, c.wantPing)
 			}
@@ -76,7 +82,7 @@ func TestStrategyShippedPosts(t *testing.T) {
 	n := New(Config{URL: srv.URL, MinPer1hGp: 250_000, MaxChecksPerHour: 2})
 	spec := &store.AttentionSpec{ChecksPerHour: 0.5, MaxUnattendedHours: 12}
 
-	n.StrategyShipped(context.Background(), fixture(300_000, nil, spec))
+	n.StrategyShipped(context.Background(), fixture(300_000, nil, spec), 1)
 	if calls != 1 {
 		t.Fatalf("want 1 ntfy POST, got %d", calls)
 	}
@@ -89,7 +95,7 @@ func TestStrategyShippedPosts(t *testing.T) {
 		}
 	}
 
-	n.StrategyShipped(context.Background(), fixture(100_000, nil, spec))
+	n.StrategyShipped(context.Background(), fixture(100_000, nil, spec), 1)
 	if calls != 1 {
 		t.Fatal("below-bar strategy must not POST")
 	}

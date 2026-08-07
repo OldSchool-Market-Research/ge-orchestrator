@@ -30,6 +30,16 @@ type Config struct {
 	Directive  string // GE_AGENT_DIRECTIVE (absolute path)
 	StateDir   string // GE_ORCH_STATE — run workspaces live under here
 	ExtraEnv   []string
+
+	// CalVetoEnforce turns the calibrated-floor rule from log-only into a
+	// real veto (GE_ORCH_CAL_VETO_MODE=enforce). It ships defaulting to
+	// log-only so a week of "would veto" lines sizes the rule before it
+	// costs any ships (FEEDBACK-LOOP.md §6 Q2).
+	CalVetoEnforce bool
+	// GraveyardCooldown is how long after its last kill a graveyarded
+	// item×archetype stays unpitchable (GE_ORCH_GRAVEYARD_COOLDOWN,
+	// default 14d; 0 disables the veto).
+	GraveyardCooldown time.Duration
 }
 
 type Runner struct {
@@ -215,8 +225,12 @@ func (r *Runner) ingest(ctx context.Context, runID int64, p brief.Params, worksp
 		return err
 	}
 	if r.Notify != nil {
+		// The ping gate weighs projections by the same calibration factors
+		// the vetter just used — a re-fetch keeps the coupling loose and the
+		// cost is one indexed query per ingest.
+		rec := r.loadRecord(ctx)
 		for _, st := range accepted {
-			r.Notify.StrategyShipped(ctx, st)
+			r.Notify.StrategyShipped(ctx, st, rec.Factor(st.Archetype))
 		}
 	}
 	// Apply the run's verdicts on its assigned signals, then return any it

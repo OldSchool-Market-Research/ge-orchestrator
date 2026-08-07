@@ -120,6 +120,11 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 	b.WriteString("- Objective: rank ALL viable options by absolute post-tax gp/day at fillable size. The floor is absolute (F: 400k gp/cycle = 100k gp/hr, B: 100k/cycle) — dismiss below-floor candidates whatever their ROI%. Shipping NOTHING is a legitimate outcome when nothing clears the bar.\n")
 	b.WriteString("- Every F/B/C strategy must state its attention contract (offer cadence, longest safe unattended window, reaction risk) — the operator decides what fits their day.\n")
 
+	if cal, err := s.CalibrationLatest(ctx); err == nil && len(cal) > 0 {
+		modes, _ := s.FailureModeCounts(ctx, store.CalWindowDays)
+		writeCalibration(&b, cal, modes)
+	}
+
 	writeOpenBook(ctx, &b, s, p)
 	writeWatchlist(ctx, &b, s)
 
@@ -129,6 +134,14 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 		for _, sig := range assigned {
 			fmt.Fprintf(&b, "- signal_id %d [%s] %s (item_id %d): %s\n",
 				sig.SignalID, sig.Kind, sig.ItemName, sig.ItemID, compactJSON(sig.Metrics))
+			// A candidate that already died once re-enters with its obituary:
+			// the run starts from the prior falsification instead of re-deriving
+			// it. Best-effort — a lookup failure just omits the line.
+			if at, reason, err := s.LatestDismissal(ctx, sig.Kind, sig.ItemID); err == nil {
+				if line := dismissalLine(at, reason); line != "" {
+					b.WriteString(line)
+				}
+			}
 		}
 	}
 
@@ -197,10 +210,110 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 		}
 	}
 
+	if grave, err := s.Graveyard(ctx); err == nil {
+		writeGraveyard(&b, grave)
+	}
+
 	if strings.TrimSpace(p.Notes) != "" {
 		b.WriteString("\n### Operator notes\n" + strings.TrimSpace(p.Notes) + "\n")
 	}
 	return b.String(), nil
+}
+
+// Ship floors, duplicated from runner/vet.go (runner imports brief, so the
+// constants can't live there and be shared). The calibration section uses
+// them to translate a factor into the raw claim it implies.
+const (
+	briefFloorFPerCycleGp = 400_000
+	briefFloorBPerCycleGp = 100_000
+)
+
+// writeCalibration renders the harness-measured factors (docs/FEEDBACK-LOOP.md
+// §3A) and the failure-mode digest (§3B). Pure over its inputs so it is
+// testable; Render only calls it when at least one factor exists.
+func writeCalibration(b *strings.Builder, cal []store.CalibrationRow, modes []store.FailureModeCount) {
+	b.WriteString("\n### Calibration (harness-measured from the paper record — pre-filter your arithmetic with it)\n")
+	fmt.Fprintf(b, "- EV_calibrated = factor x your claimed EV, where factor = p_survive (share of closed ships alive past %.0fh, trailing %dd) x pace_ratio (median realized/projected of those survivors). Judge your own candidates by their calibrated EV — the harness does.\n",
+		store.CalSurviveHours, store.CalWindowDays)
+	for _, r := range cal {
+		fmt.Fprintf(b, "- %s: factor %.2f = p_survive %s x pace %s.",
+			r.Archetype, r.Factor,
+			calComponent(r.PSurvive, fmt.Sprintf("%d of %d closed alive", r.NSurvived, r.NClosed), r.NClosed),
+			calComponent(r.PaceRatio, fmt.Sprintf("n=%d", r.NPace), r.NPace))
+		var floor int64
+		switch r.Archetype {
+		case "F":
+			floor = briefFloorFPerCycleGp
+		case "B":
+			floor = briefFloorBPerCycleGp
+		}
+		if floor > 0 && r.Factor > 0 && r.Factor < 1 {
+			fmt.Fprintf(b, " At this factor the %s gp/cycle floor implies a raw claim of ~%s gp/cycle to hold up.",
+				group(floor), group(int64(float64(floor)/r.Factor)))
+		}
+		b.WriteString("\n")
+	}
+	if len(modes) > 0 {
+		byArch := map[string][]string{}
+		var order []string
+		for _, m := range modes {
+			if _, seen := byArch[m.Archetype]; !seen {
+				order = append(order, m.Archetype)
+			}
+			byArch[m.Archetype] = append(byArch[m.Archetype], fmt.Sprintf("%s %d", m.Mode, m.N))
+		}
+		for _, a := range order {
+			fmt.Fprintf(b, "- %s closes by failure mode, last %dd: %s.\n", a, store.CalWindowDays, strings.Join(byArch[a], ", "))
+		}
+	}
+}
+
+// calComponent renders one factor component: the value with its sample
+// evidence, or the below-gate marker citing the sample that fell short.
+func calComponent(v *float64, evidence string, gateN int) string {
+	if v == nil {
+		return fmt.Sprintf("default (below sample gate, n=%d)", gateN)
+	}
+	return fmt.Sprintf("%.2f (%s)", *v, evidence)
+}
+
+// writeGraveyard renders the do-not-pitch set (docs/FEEDBACK-LOOP.md §3D).
+// Pure over its input; empty input writes nothing.
+func writeGraveyard(b *strings.Builder, rows []store.GraveyardRow) {
+	if len(rows) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\n### Graveyard (do not pitch — >=%d kills and net-negative realized in the trailing %dd)\n",
+		store.GraveyardMinKills, store.GraveyardWindowDays)
+	b.WriteString("The record has falsified these item x archetype pairs repeatedly. Pitch one only with a materially NEW signal class (e.g. a U event on an F corpse), and say so in the thesis.\n")
+	const maxLines = 15
+	for i, r := range rows {
+		if i == maxLines {
+			fmt.Fprintf(b, "- …and %d more.\n", len(rows)-maxLines)
+			break
+		}
+		fmt.Fprintf(b, "- %s [%s] (item_id %d): %d kills, %s gp realized, last killed %s\n",
+			r.ItemName, r.Archetype, r.ItemID, r.Kills, group(r.EstRealizedGp), r.LastKilledAt.Format("01-02"))
+	}
+}
+
+// dismissalLine renders a re-entered candidate's prior falsification as an
+// indented follow-on line, or "" when there is none.
+func dismissalLine(at *time.Time, reason *string) string {
+	if at == nil || reason == nil || strings.TrimSpace(*reason) == "" {
+		return ""
+	}
+	r := strings.TrimSpace(*reason)
+	if len(r) > 220 {
+		// Truncate on a rune boundary — a byte slice can split a multibyte
+		// character and produce invalid UTF-8 (the run-534 ingest failure).
+		runes := []rune(r)
+		if len(runes) > 220 {
+			runes = runes[:220]
+		}
+		r = string(runes) + "…"
+	}
+	return fmt.Sprintf("  - previously dismissed %s: %s\n", at.Format("01-02"), r)
 }
 
 // writeOpenBook appends the live book (open + armed strategies) so the model
@@ -321,6 +434,9 @@ func MarshalParams(p Params) json.RawMessage {
 
 // group renders 157464000 as 157,464,000 (display only — never sent as data).
 func group(n int64) string {
+	if n < 0 {
+		return "-" + group(-n)
+	}
 	s := fmt.Sprintf("%d", n)
 	if len(s) <= 3 {
 		return s

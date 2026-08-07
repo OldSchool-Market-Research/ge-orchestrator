@@ -25,6 +25,12 @@ type Config struct {
 	SnapshotTopN    int           // rows persisted per lens per cycle (default 25)
 	SignalTTL       time.Duration // pending signals expire after this (default 72h)
 	RevalidateAfter time.Duration // watch entries re-queue after this (default 5d)
+	// DismissCooldown is dismissal memory (docs/FEEDBACK-LOOP.md §3E): a
+	// (kind, item) the agent dismissed is not re-queued for this long — its
+	// falsification is presumed to still hold. Applies to detection lenses
+	// only; watch revalidation is exempt (re-proving is its whole job).
+	// Default 48h; negative disables.
+	DismissCooldown time.Duration
 
 	// Lane F — volume flips: deep-market commodities where post-tax margin x
 	// buy limit pays real gp per 4h cycle. Ranked and gated in absolute gp.
@@ -55,6 +61,11 @@ func (c *Config) defaults() {
 	}
 	if c.RevalidateAfter == 0 {
 		c.RevalidateAfter = 5 * 24 * time.Hour
+	}
+	if c.DismissCooldown == 0 {
+		c.DismissCooldown = 48 * time.Hour
+	} else if c.DismissCooldown < 0 {
+		c.DismissCooldown = 0
 	}
 	if c.FlipFreshAge == 0 {
 		c.FlipFreshAge = 30 * time.Minute
@@ -507,7 +518,7 @@ func (c *Collector) sweepWatch(ctx context.Context) int {
 		if w.LastResult != nil {
 			metrics["last_result"] = *w.LastResult
 		}
-		isNew, err := c.Store.UpsertSignal(ctx, "watch", w.ItemID, w.ItemName, metrics)
+		isNew, err := c.Store.UpsertSignal(ctx, "watch", w.ItemID, w.ItemName, metrics, 0)
 		if err != nil {
 			log.Printf("collect: watch signal %d: %v", w.ItemID, err)
 			continue
@@ -539,7 +550,7 @@ func persist[T any](c *Collector, ctx context.Context, asOf time.Time, lens stri
 		if !significant {
 			continue
 		}
-		isNew, err := c.Store.UpsertSignal(ctx, lens, id, name, r)
+		isNew, err := c.Store.UpsertSignal(ctx, lens, id, name, r, c.Cfg.DismissCooldown)
 		if err != nil {
 			log.Printf("collect: %s signal %d: %v", lens, id, err)
 			continue
