@@ -84,9 +84,11 @@ func (ev *Evaluator) computeUpdate(ctx context.Context, st store.Strategy) (stor
 
 	// Hard stop: 7 days past the event, whatever was going to happen happened.
 	if postEvent && now.Sub(eventAt) > 7*24*time.Hour && st.State == "open" {
-		if err := ev.Store.CloseStrategy(ctx, st.StrategyID, "expired", "event passed 7+ days ago"); err != nil {
+		if err := ev.Store.CloseStrategy(ctx, st.StrategyID, "expired", "event passed 7+ days ago",
+			strPtr("expired_below_pace")); err != nil {
 			return e, checks, err
 		}
+		ev.recalibrate(ctx, st.Archetype)
 	}
 	return e, checks, nil
 }

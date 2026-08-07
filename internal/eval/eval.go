@@ -182,7 +182,7 @@ func (ev *Evaluator) transition(ctx context.Context, st store.Strategy, now time
 		}
 		if now.Sub(st.OpenedAt) >= armedTTL {
 			return ev.Store.CloseStrategy(ctx, st.StrategyID, "expired",
-				"armed trigger never fired within 7 days")
+				"armed trigger never fired within 7 days", strPtr("never_triggered"))
 		}
 		return nil
 	}
@@ -245,13 +245,14 @@ func (ev *Evaluator) transition(ctx context.Context, st store.Strategy, now time
 // Scoring failure is logged, not returned — the close already happened and
 // must not be retried as if it hadn't.
 func (ev *Evaluator) closeAndScore(ctx context.Context, st store.Strategy, state, reason string) error {
-	if err := ev.Store.CloseStrategy(ctx, st.StrategyID, state, reason); err != nil {
+	if err := ev.Store.CloseStrategy(ctx, st.StrategyID, state, reason, ev.failureMode(ctx, st, state)); err != nil {
 		return err
 	}
 	name := firstItemName(st.Items)
 	if err := ev.Store.RecordStrategyOutcome(ctx, st.PrimaryItemID, name, st.Archetype, st.Sid, state); err != nil {
 		log.Printf("eval: watchlist outcome for %s (%s): %v", st.Sid, state, err)
 	}
+	ev.recalibrate(ctx, st.Archetype)
 	return nil
 }
 

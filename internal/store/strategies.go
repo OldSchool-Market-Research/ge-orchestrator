@@ -289,6 +289,7 @@ type Strategy struct {
 	PaperTrade    *string         `json:"paper_trade"`
 	State         string          `json:"state"`
 	StateReason   *string         `json:"state_reason"`
+	FailureMode   *string         `json:"failure_mode,omitempty"`
 	OpenedAt      time.Time       `json:"opened_at"`
 	ClosedAt      *time.Time      `json:"closed_at"`
 
@@ -311,7 +312,7 @@ const strategyCols = `strategy_id, run_id, sid, archetype, title, thesis, items,
 	state, state_reason, opened_at, closed_at,
 	extract(epoch from eval_window)::float8,
 	buy_window, sell_window, trigger, direction, legs, relation_id, event, triggered_at,
-	projected_per_1h_gp, attention_spec`
+	projected_per_1h_gp, attention_spec, failure_mode`
 
 func scanStrategy(row pgx.Row) (*Strategy, error) {
 	var st Strategy
@@ -323,7 +324,7 @@ func scanStrategy(row pgx.Row) (*Strategy, error) {
 		&st.Confidence, &st.ConfidenceWhy, &st.Invalidation, &st.Risks, &st.PaperTrade,
 		&st.State, &st.StateReason, &st.OpenedAt, &st.ClosedAt,
 		&st.EvalWindowS, &buyW, &sellW, &trig, &st.Direction, &legs, &st.RelationID, &event, &st.TriggeredAt,
-		&st.ProjectedPer1hGp, &attnSpec)
+		&st.ProjectedPer1hGp, &attnSpec, &st.FailureMode)
 	if err != nil {
 		return nil, err
 	}
@@ -394,9 +395,12 @@ func (s *Store) StrategyByID(ctx context.Context, id int64) (*Strategy, error) {
 	return st, err
 }
 
-func (s *Store) CloseStrategy(ctx context.Context, id int64, state, reason string) error {
+// CloseStrategy closes an open/armed strategy. failureMode is the labeled
+// lesson for the calibration digest (migration 012) — nil on confirms and
+// unlabelable closes.
+func (s *Store) CloseStrategy(ctx context.Context, id int64, state, reason string, failureMode *string) error {
 	_, err := s.Pool.Exec(ctx, `UPDATE orchestrator.strategies
-		SET state=$2, state_reason=$3, closed_at=now() WHERE strategy_id=$1 AND state IN ('open','armed')`,
-		id, state, reason)
+		SET state=$2, state_reason=$3, failure_mode=$4, closed_at=now() WHERE strategy_id=$1 AND state IN ('open','armed')`,
+		id, state, reason, failureMode)
 	return err
 }
