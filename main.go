@@ -73,6 +73,7 @@ func main() {
 			APIKey:    apiKey,
 			Directive: mustEnv("GE_AGENT_DIRECTIVE"),
 			StateDir:  getenv("GE_ORCH_STATE", "state"),
+			ExtraEnv:  agentEnvPassthrough(),
 
 			CalVetoEnforce:    calVetoMode == "enforce",
 			GraveyardCooldown: graveyardCooldown,
@@ -82,7 +83,7 @@ func main() {
 		Prices: eval.NewPgSource(st.Pool),
 		Notify: notifier,
 	}
-	ev := &eval.Evaluator{Store: st}
+	ev := &eval.Evaluator{Store: st, Notify: notifier}
 
 	// Evaluation ticker (+ optional empty-portfolio auto-trigger).
 	evalEvery := durEnv("GE_ORCH_EVAL_INTERVAL", 5*time.Minute)
@@ -209,6 +210,28 @@ func maybeTriggerOnSignals(ctx context.Context, st *store.Store, r *runner.Runne
 		return
 	}
 	log.Printf("trigger-on-signals: new signals queued, started run %d", runID)
+}
+
+// agentEnvPassthrough forwards every GE_AGENT_* var from the pod
+// environment to the spawned agent, except the ones the runner owns
+// (directive, brief, and the workspace-relative reports dir). Before this,
+// runner.execute's fixed five-var env made every agent tuning knob
+// (GE_AGENT_MAX_TURNS, _MAX_TOKENS, _MODEL, _RUN_TIMEOUT_S, ...)
+// unreachable from the deployment — frozen at compile-time defaults.
+func agentEnvPassthrough() []string {
+	owned := map[string]bool{
+		"GE_AGENT_DIRECTIVE":   true,
+		"GE_AGENT_BRIEF_FILE":  true,
+		"GE_AGENT_REPORTS_DIR": true,
+	}
+	var extra []string
+	for _, kv := range os.Environ() {
+		name, _, ok := strings.Cut(kv, "=")
+		if ok && strings.HasPrefix(name, "GE_AGENT_") && !owned[name] {
+			extra = append(extra, kv)
+		}
+	}
+	return extra
 }
 
 func mustEnv(key string) string {
