@@ -174,19 +174,19 @@ func (s *Store) InsertStrategies(ctx context.Context, runID int64, openedAt time
 		if st.Archetype == "V" {
 			state = "armed"
 		}
-		if err := insertStrategy(ctx, tx, runID, openedAt, st, state, nil, nil); err != nil {
+		if err := insertStrategy(ctx, tx, runID, openedAt, st, state, nil, nil, s.EpochFor(st.Archetype)); err != nil {
 			return err
 		}
 	}
 	for _, v := range vetoed {
-		if err := insertStrategy(ctx, tx, runID, openedAt, v.Strategy, "vetoed", &v.Reason, &openedAt); err != nil {
+		if err := insertStrategy(ctx, tx, runID, openedAt, v.Strategy, "vetoed", &v.Reason, &openedAt, s.EpochFor(v.Strategy.Archetype)); err != nil {
 			return err
 		}
 	}
 	return tx.Commit(ctx)
 }
 
-func insertStrategy(ctx context.Context, tx pgx.Tx, runID int64, openedAt time.Time, st SidecarStrategy, state string, reason *string, closedAt *time.Time) error {
+func insertStrategy(ctx context.Context, tx pgx.Tx, runID int64, openedAt time.Time, st SidecarStrategy, state string, reason *string, closedAt *time.Time, epoch int) error {
 	if len(st.Items) == 0 {
 		return fmt.Errorf("strategy %s: no items", st.ID)
 	}
@@ -213,10 +213,10 @@ func insertStrategy(ctx context.Context, tx pgx.Tx, runID int64, openedAt time.T
 		 confidence, confidence_why, evidence, invalidation, risks, paper_trade,
 		 state, state_reason, opened_at, closed_at,
 		 buy_window, sell_window, trigger, direction, legs, relation_id, event,
-		 attention_spec)
+		 attention_spec, eval_epoch)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
 		        make_interval(hours => $15),$16,$17,$18,$19,$20,$21,$22,
-		        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40)`,
+		        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41)`,
 		runID, st.ID, st.Archetype, st.Title, st.Thesis, items, st.PrimaryItemID(),
 		st.Entry, st.Exit, st.EntryPrice, st.ExitPrice, st.KillPrice, st.Horizon, nullIfEmpty(st.Attention),
 		evalWindowHours(st), st.CapitalRequired, st.Size.UnitsUsed,
@@ -231,6 +231,7 @@ func insertStrategy(ctx context.Context, tx pgx.Tx, runID int64, openedAt time.T
 		st.RelationID,
 		marshalOrNil(st.Event, st.Event != nil),
 		marshalOrNil(st.AttentionSpec, st.AttentionSpec != nil),
+		epoch,
 	); err != nil {
 		return fmt.Errorf("insert strategy %s: %w", st.ID, err)
 	}
@@ -290,6 +291,7 @@ type Strategy struct {
 	State         string          `json:"state"`
 	StateReason   *string         `json:"state_reason"`
 	FailureMode   *string         `json:"failure_mode,omitempty"`
+	EvalEpoch     int             `json:"eval_epoch"`
 	OpenedAt      time.Time       `json:"opened_at"`
 	ClosedAt      *time.Time      `json:"closed_at"`
 
@@ -312,7 +314,7 @@ const strategyCols = `strategy_id, run_id, sid, archetype, title, thesis, items,
 	state, state_reason, opened_at, closed_at,
 	extract(epoch from eval_window)::float8,
 	buy_window, sell_window, trigger, direction, legs, relation_id, event, triggered_at,
-	projected_per_1h_gp, attention_spec, failure_mode`
+	projected_per_1h_gp, attention_spec, failure_mode, eval_epoch`
 
 func scanStrategy(row pgx.Row) (*Strategy, error) {
 	var st Strategy
@@ -324,7 +326,7 @@ func scanStrategy(row pgx.Row) (*Strategy, error) {
 		&st.Confidence, &st.ConfidenceWhy, &st.Invalidation, &st.Risks, &st.PaperTrade,
 		&st.State, &st.StateReason, &st.OpenedAt, &st.ClosedAt,
 		&st.EvalWindowS, &buyW, &sellW, &trig, &st.Direction, &legs, &st.RelationID, &event, &st.TriggeredAt,
-		&st.ProjectedPer1hGp, &attnSpec, &st.FailureMode)
+		&st.ProjectedPer1hGp, &attnSpec, &st.FailureMode, &st.EvalEpoch)
 	if err != nil {
 		return nil, err
 	}

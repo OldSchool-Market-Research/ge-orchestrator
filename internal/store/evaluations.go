@@ -145,6 +145,12 @@ type PnLRow struct {
 	EstRealizedGp *int64     `json:"est_realized_gp"`
 	ProjectedGp   *int64     `json:"projected_gp"`
 	Capital       *int64     `json:"capital_required"`
+	// EvalEpoch annotates the measurement regime (migration 015); SimScored
+	// marks rows whose est_realized_gp is the fill simulator's frozen
+	// final equity rather than the median-pace estimate — the dashboard
+	// annotates the regime break instead of hiding it.
+	EvalEpoch int  `json:"eval_epoch"`
+	SimScored bool `json:"sim_scored,omitempty"`
 }
 
 // PnL returns per-strategy paper-trade estimates for every strategy that has
@@ -155,7 +161,8 @@ func (s *Store) PnL(ctx context.Context) ([]PnLRow, error) {
 	rows, err := s.Pool.Query(ctx, `SELECT s.strategy_id, s.sid, s.title, s.archetype, s.state,
 		s.opened_at, s.closed_at,
 		greatest(extract(epoch from (coalesce(s.closed_at, now()) - coalesce(s.triggered_at, s.opened_at)))/3600.0, 0)::float8 AS hours,
-		est.med_1h::float8, coalesce(s.projected_per_1h_gp, s.per_1h_gp), s.capital_required
+		est.med_1h::float8, coalesce(s.projected_per_1h_gp, s.per_1h_gp), s.capital_required,
+		s.eval_epoch, pos.final_equity_gp
 		FROM orchestrator.strategies s
 		JOIN LATERAL (
 			SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY e.realized_per_1h_gp) AS med_1h
@@ -163,6 +170,7 @@ func (s *Store) PnL(ctx context.Context) ([]PnLRow, error) {
 			WHERE e.strategy_id = s.strategy_id
 			  AND (s.triggered_at IS NULL OR e.at >= s.triggered_at)
 		) est ON true
+		LEFT JOIN orchestrator.positions pos ON pos.strategy_id = s.strategy_id
 		WHERE s.state <> 'vetoed' AND NOT (s.state = 'armed' AND s.triggered_at IS NULL)
 		ORDER BY s.strategy_id`)
 	if err != nil {
@@ -172,12 +180,19 @@ func (s *Store) PnL(ctx context.Context) ([]PnLRow, error) {
 	var out []PnLRow
 	for rows.Next() {
 		var r PnLRow
-		var per1h *int64
+		var per1h, finalEquity *int64
 		if err := rows.Scan(&r.StrategyID, &r.Sid, &r.Title, &r.Archetype, &r.State,
-			&r.OpenedAt, &r.ClosedAt, &r.Hours, &r.MedRealized1h, &per1h, &r.Capital); err != nil {
+			&r.OpenedAt, &r.ClosedAt, &r.Hours, &r.MedRealized1h, &per1h, &r.Capital,
+			&r.EvalEpoch, &finalEquity); err != nil {
 			return nil, err
 		}
-		if r.MedRealized1h != nil {
+		switch {
+		case finalEquity != nil:
+			// Sim-scored close: the frozen ledger equity IS the realized
+			// number — no pace-times-hours estimate involved.
+			r.EstRealizedGp = finalEquity
+			r.SimScored = true
+		case r.MedRealized1h != nil:
 			v := int64(*r.MedRealized1h * r.Hours)
 			r.EstRealizedGp = &v
 		}
