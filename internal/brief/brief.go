@@ -392,6 +392,7 @@ func firstItemName(raw json.RawMessage) string {
 // Best-effort: a missing sweep (fresh install) just omits the section.
 func writeSweep(ctx context.Context, b *strings.Builder, s *store.Store) {
 	lenses := []struct{ lens, title string }{
+		{"combo", "lane C candidates: conversions priced both directions, ranked by budget-sized gp/4h (budget_cycle_gp — already sized to the research budget, do not dismiss on per-conversion margin)"},
 		{"vflip", "lane F candidates: volume flips ranked by margin x buy_limit (gp_cycle)"},
 		{"hvflip", "lane B candidates: 10M+ flips ranked by absolute post-tax margin"},
 		{"volume", "volume anomalies"},
