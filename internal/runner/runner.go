@@ -225,12 +225,13 @@ func (r *Runner) ingest(ctx context.Context, runID int64, p brief.Params, worksp
 		return err
 	}
 	if r.Notify != nil {
-		// The ping gate weighs projections by the same calibration factors
+		// The ping gate weighs projections by the same calibration rows
 		// the vetter just used — a re-fetch keeps the coupling loose and the
-		// cost is one indexed query per ingest.
+		// cost is one indexed query per ingest. The full row (not just the
+		// factor) lets the gate skip calibration when it's only a default.
 		rec := r.loadRecord(ctx)
 		for _, st := range accepted {
-			r.Notify.StrategyShipped(ctx, st, rec.Factor(st.Archetype))
+			r.Notify.StrategyShipped(ctx, st, rec.CalRow(st.Archetype))
 		}
 	}
 	// Apply the run's verdicts on its assigned signals, then return any it

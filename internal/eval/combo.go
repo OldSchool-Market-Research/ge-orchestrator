@@ -6,6 +6,58 @@ import (
 	"github.com/osrs-ge/ge-orchestrator/internal/store"
 )
 
+// ProjectComboPer1h is the harness's own ship-time projection of a lane-C
+// strategy: the same haircut arithmetic computeCombo realizes with (slippage
+// per leg, per-leg sell tax, participation-capped conversions, one 4h
+// batch), applied to the strategy's own legs at the ship-time snapshots.
+// Stored as strategies.projected_per_1h_gp it becomes the confirm-ratio
+// denominator and the ping gate's number — C previously fell through to the
+// agent's raw claim. Returns nil when any leg is unpriced or the haircut
+// margin doesn't survive (a conversion is only as tradeable as its least
+// liquid side). Keep the arithmetic in lockstep with computeCombo.
+func ProjectComboPer1h(legs []store.Leg, unitsUsed int64, snaps map[int]*Snap) *int64 {
+	if len(legs) == 0 || unitsUsed <= 0 {
+		return nil
+	}
+	ev := &Evaluator{}
+	var marginHaircut int64
+	var minLegConversions *int64
+	for _, l := range legs {
+		snap := snaps[l.ItemID]
+		if snap == nil {
+			return nil
+		}
+		var price *int64
+		if l.Side == "buy" {
+			price = snap.Low
+		} else {
+			price = snap.High
+		}
+		if price == nil {
+			return nil
+		}
+		if l.Side == "buy" {
+			marginHaircut -= ev.slipBuy(*price) * l.Qty
+		} else {
+			sp := ev.slipSell(*price)
+			marginHaircut += (sp - sellTax(sp)) * l.Qty
+		}
+		legConv := int64(ev.participation() * float64(snap.Vol30m*8) / float64(l.Qty))
+		if minLegConversions == nil || legConv < *minLegConversions {
+			minLegConversions = &legConv
+		}
+	}
+	capped := unitsUsed
+	if minLegConversions != nil && *minLegConversions < capped {
+		capped = *minLegConversions
+	}
+	if marginHaircut <= 0 || capped <= 0 {
+		return nil
+	}
+	v := marginHaircut * capped / 4
+	return &v
+}
+
 // computeCombo evaluates a C strategy: re-price every leg at the latest
 // quotes (one round trip), compose the post-tax conversion margin, and judge
 // it against the projected one. The WORST leg governs freshness and volume —

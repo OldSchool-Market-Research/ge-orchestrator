@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osrs-ge/ge-orchestrator/internal/notify"
 	"github.com/osrs-ge/ge-orchestrator/internal/store"
 )
 
@@ -75,6 +76,7 @@ func policyFor(archetype string) Policy {
 type Evaluator struct {
 	Store  *store.Store
 	Source PriceSource // nil = pg-backed on Store.Pool
+	Notify *notify.Notifier // confirm ping; nil disables
 
 	Participation float64 // 0 = default 0.15
 	Slippage      float64 // 0 = default 0.005
@@ -284,7 +286,21 @@ func (ev *Evaluator) transition(ctx context.Context, st store.Strategy, now time
 			ratio != nil && *ratio >= bar {
 			reason := sprintf("window %s: %d/%d healthy, median realized/projected %.2f >= calibrated bar %.2f (%.2f x factor %.2f, haircut)",
 				window, healthy, total, *ratio, bar, pol.ConfirmRatioMin, factor)
-			return ev.closeAndScore(ctx, st, "confirmed", reason)
+			if err := ev.closeAndScore(ctx, st, "confirmed", reason); err != nil {
+				return err
+			}
+			if ev.Notify != nil {
+				// Realized pace = confirm ratio x the same denominator the
+				// ratio was measured against (harness projection when set).
+				den := int64(0)
+				if st.ProjectedPer1hGp != nil {
+					den = *st.ProjectedPer1hGp
+				} else if st.Per1hGp != nil {
+					den = *st.Per1hGp
+				}
+				ev.Notify.StrategyConfirmed(ctx, st, int64(*ratio*float64(den)))
+			}
+			return nil
 		}
 		r := sprintf("window %s elapsed without meeting confirmation", window)
 		if ratio != nil {

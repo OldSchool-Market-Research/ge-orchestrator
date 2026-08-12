@@ -95,7 +95,21 @@ func (r *Runner) vet(ctx context.Context, p brief.Params, list []store.SidecarSt
 // once per run, nil-safe throughout.
 type record struct {
 	factors map[string]float64
+	cal     map[string]store.CalibrationRow
 	grave   map[graveKey]store.GraveyardRow
+}
+
+// CalRow returns the archetype's latest calibration row, nil when none has
+// been computed — the ping gate needs the full row to tell a measured
+// factor from the conservative default.
+func (rec *record) CalRow(archetype string) *store.CalibrationRow {
+	if rec == nil || rec.cal == nil {
+		return nil
+	}
+	if row, ok := rec.cal[archetype]; ok {
+		return &row
+	}
+	return nil
 }
 
 type graveKey struct {
@@ -122,8 +136,10 @@ func (r *Runner) loadRecord(ctx context.Context) *record {
 		log.Printf("vet: calibration lookup: %v", err)
 	} else {
 		rec.factors = make(map[string]float64, len(cal))
+		rec.cal = make(map[string]store.CalibrationRow, len(cal))
 		for _, row := range cal {
 			rec.factors[row.Archetype] = row.Factor
+			rec.cal[row.Archetype] = row
 		}
 	}
 	if grave, err := r.Store.Graveyard(ctx); err != nil {
@@ -224,6 +240,20 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 	var proj *int64
 	if st.Archetype == "F" && snap != nil {
 		proj = eval.ProjectFlipPer1h(st.EntryPrice, st.ExitPrice, st.Size.UnitsUsed, snap.Vol30m)
+	}
+	if st.Archetype == "C" && r.Prices != nil && len(st.Legs) > 0 {
+		// C gets a harness projection like F: the ping gate and the confirm
+		// ratio should judge against the harness's haircut arithmetic, not
+		// the agent's raw claim.
+		ids := make([]int, 0, len(st.Legs))
+		for _, l := range st.Legs {
+			ids = append(ids, l.ItemID)
+		}
+		if snaps, err := r.Prices.SnapshotMany(ctx, ids); err != nil {
+			log.Printf("vet %s: combo snapshots: %v", st.ID, err)
+		} else {
+			proj = eval.ProjectComboPer1h(st.Legs, st.Size.UnitsUsed, snaps)
+		}
 	}
 	return "", proj
 }
