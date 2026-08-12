@@ -419,3 +419,62 @@ func TestProjectFlipPer1h(t *testing.T) {
 		t.Error("spread eaten by slippage+tax should project nil")
 	}
 }
+
+func TestComboCalibratedMarginYardstick(t *testing.T) {
+	// Live raw margin: 3x(9440-188) - 4x7000 = 27756 - 28000 = -244.
+	// Projected 330: uncalibrated bar 165 kills this; factor 0.2 drops the
+	// bar to 33 — still above -244, so calibration alone must NOT save a
+	// genuinely negative margin.
+	src := &fakeSource{snaps: map[int]*Snap{
+		139:  {Low: i64(7000), High: i64(7100), LowAgeS: iptr(120), HighAgeS: iptr(120), Vol30m: 9000},
+		2434: {Low: i64(9300), High: i64(9440), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000},
+	}}
+	ev := fixedEvaluator(src, tue1200)
+	ev.CalFactors = map[string]float64{"C": 0.2}
+	e, _, err := ev.computeCombo(context.Background(), comboStrategy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Verdict != "kill_signal" {
+		t.Fatalf("negative live margin must kill at any factor, got %s", e.Verdict)
+	}
+
+	// Live raw margin: 3x(9500-190) - 4x7250 = 27930 - 29000 = ... use a
+	// margin between the calibrated bar (33) and the uncalibrated one (165):
+	// buy 4x6960 = 27840, sell 3x(9330-186) = 27432 -> raw -408. Pick prices
+	// giving raw = 100: buy 4x6957=27828, sell 3x(9500-190)=27930 -> 102.
+	src2 := &fakeSource{snaps: map[int]*Snap{
+		139:  {Low: i64(6957), High: i64(7100), LowAgeS: iptr(120), HighAgeS: iptr(120), Vol30m: 9000},
+		2434: {Low: i64(9300), High: i64(9500), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000},
+	}}
+	evUncal := fixedEvaluator(src2, tue1200)
+	if e, _, err := evUncal.computeCombo(context.Background(), comboStrategy()); err != nil {
+		t.Fatal(err)
+	} else if e.Verdict != "kill_signal" {
+		t.Fatalf("margin 102 < uncalibrated bar 165 must kill, got %s", e.Verdict)
+	}
+	evCal := fixedEvaluator(src2, tue1200)
+	evCal.CalFactors = map[string]float64{"C": 0.2}
+	if e, _, err := evCal.computeCombo(context.Background(), comboStrategy()); err != nil {
+		t.Fatal(err)
+	} else if e.Verdict == "kill_signal" {
+		t.Fatal("margin 102 >= calibrated bar 33 must not kill")
+	}
+}
+
+func TestCalFactorFailOpen(t *testing.T) {
+	ev := &Evaluator{} // no Store, no overrides
+	if f := ev.calFactor(context.Background(), "F"); f != 1 {
+		t.Errorf("no store: factor = %v, want 1", f)
+	}
+	ev.CalFactors = map[string]float64{"F": 0.21, "B": -3}
+	if f := ev.calFactor(context.Background(), "F"); f != 0.21 {
+		t.Errorf("override: factor = %v, want 0.21", f)
+	}
+	if f := ev.calFactor(context.Background(), "B"); f != 1 {
+		t.Errorf("degenerate override: factor = %v, want 1", f)
+	}
+	if f := ev.calFactor(context.Background(), "C"); f != 1 {
+		t.Errorf("unmeasured archetype: factor = %v, want 1", f)
+	}
+}

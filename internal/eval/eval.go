@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/osrs-ge/ge-orchestrator/internal/store"
@@ -78,6 +79,52 @@ type Evaluator struct {
 	Participation float64 // 0 = default 0.15
 	Slippage      float64 // 0 = default 0.005
 	Now           func() time.Time
+
+	// CalFactors overrides the stored calibration factors (tests, tools).
+	// nil = fetch from the Store with a short cache.
+	CalFactors map[string]float64
+
+	calMu sync.Mutex
+	calAt time.Time
+	cal   map[string]float64
+}
+
+// calFactor is the archetype's calibration factor for yardstick purposes
+// (docs/FEEDBACK-LOOP.md §3C). Fail-open contract: no Store, no rows, a
+// lookup error, or a degenerate factor all read as 1 (uncalibrated) — a
+// missing measurement must never change a verdict. Cached for a minute so a
+// tick over the whole book costs one query.
+func (ev *Evaluator) calFactor(ctx context.Context, archetype string) float64 {
+	if ev.CalFactors != nil {
+		if f, ok := ev.CalFactors[archetype]; ok && f > 0 {
+			return f
+		}
+		return 1
+	}
+	if ev.Store == nil {
+		return 1
+	}
+	ev.calMu.Lock()
+	defer ev.calMu.Unlock()
+	if ev.cal == nil || ev.now().Sub(ev.calAt) > time.Minute {
+		rows, err := ev.Store.CalibrationLatest(ctx)
+		if err != nil {
+			log.Printf("eval: calibration lookup: %v", err)
+			if ev.cal == nil {
+				return 1
+			}
+		} else {
+			ev.cal = make(map[string]float64, len(rows))
+			for _, r := range rows {
+				ev.cal[r.Archetype] = r.Factor
+			}
+			ev.calAt = ev.now()
+		}
+	}
+	if f, ok := ev.cal[archetype]; ok && f > 0 {
+		return f
+	}
+	return 1
 }
 
 func (ev *Evaluator) source() PriceSource {
@@ -226,14 +273,22 @@ func (ev *Evaluator) transition(ctx context.Context, st store.Strategy, now time
 			return ev.closeAndScore(ctx, st, "expired",
 				"eval window elapsed without enough in-window observations to judge")
 		}
+		// The confirm bar is measured against the CALIBRATED projection
+		// (docs/FEEDBACK-LOOP.md §3C): ratio >= ConfirmRatioMin × factor,
+		// i.e. realized must beat half of what the record says projections
+		// of this archetype are actually worth. With no calibration rows
+		// the factor is 1 and this is exactly the old rule.
+		factor := ev.calFactor(ctx, st.Archetype)
+		bar := pol.ConfirmRatioMin * factor
 		if total > 0 && float64(healthy)/float64(total) >= pol.ConfirmHealthy &&
-			ratio != nil && *ratio >= pol.ConfirmRatioMin {
-			reason := sprintf("window %s: %d/%d healthy, median realized/projected %.2f (haircut)", window, healthy, total, *ratio)
+			ratio != nil && *ratio >= bar {
+			reason := sprintf("window %s: %d/%d healthy, median realized/projected %.2f >= calibrated bar %.2f (%.2f x factor %.2f, haircut)",
+				window, healthy, total, *ratio, bar, pol.ConfirmRatioMin, factor)
 			return ev.closeAndScore(ctx, st, "confirmed", reason)
 		}
 		r := sprintf("window %s elapsed without meeting confirmation", window)
 		if ratio != nil {
-			r += sprintf(" (%d/%d healthy, ratio %.2f)", healthy, total, *ratio)
+			r += sprintf(" (%d/%d healthy, ratio %.2f vs calibrated bar %.2f)", healthy, total, *ratio, bar)
 		}
 		return ev.closeAndScore(ctx, st, "expired", r)
 	}
