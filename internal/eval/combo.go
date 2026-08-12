@@ -81,8 +81,12 @@ func (ev *Evaluator) computeCombo(ctx context.Context, st store.Strategy) (store
 	checks["legs_fresh"] = allFresh
 	checks["vol_ok"] = volOK
 
+	// The margin yardstick is the CALIBRATED projection (§3C): the pitched
+	// margin was an optimistic snapshot, and killing against it re-litigates
+	// the pitch instead of the position. factor 1 (no record) = old rule.
+	factor := ev.calFactor(ctx, st.Archetype)
 	projected := st.ExitPrice - st.EntryPrice // per conversion, post-tax by contract
-	marginOK := allPriced && float64(marginNowRaw) >= marginOKFraction*float64(projected)
+	marginOK := allPriced && float64(marginNowRaw) >= marginOKFraction*factor*float64(projected)
 	checks["margin_ok"] = marginOK
 
 	var realizedPer1h, rawPer1h *int64
@@ -110,7 +114,7 @@ func (ev *Evaluator) computeCombo(ctx context.Context, st store.Strategy) (store
 	finishEvaluation(&e, checks, verdict, map[string]any{
 		"legs": legDetails,
 		"combo_margin_now": marginNowRaw, "combo_margin_haircut": marginNowHaircut,
-		"projected_margin": projected,
+		"projected_margin": projected, "cal_factor": factor,
 		"realized_raw_per_1h": rawPer1h, "realized_haircut_per_1h": realizedPer1h,
 	})
 	return e, checks, nil
