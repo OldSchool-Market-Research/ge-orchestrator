@@ -224,7 +224,7 @@ func (s *Store) collectCalibrations(ctx context.Context, query string, args ...a
 	for rows.Next() {
 		var r CalibrationRow
 		if err := rows.Scan(&r.ComputedAt, &r.Archetype, &r.WindowDays, &r.SurviveHours,
-			&r.NClosed, &r.NSurvived, &r.PSurvive, &r.NPace, &r.PaceRatio, &r.Factor); err != nil {
+			&r.NClosed, &r.NSurvived, &r.PSurvive, &r.NPace, &r.PaceRatio, &r.Factor, &r.Epoch); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
