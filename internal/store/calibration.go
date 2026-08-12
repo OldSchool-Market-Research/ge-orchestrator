@@ -25,8 +25,13 @@ const (
 	calMinSample       = 10
 	calDefaultPSurvive = 0.25 // ≈ the observed pre-loop reality
 	calDefaultPace     = 0.5
-	calFactorMin       = 0.05
-	calFactorMax       = 1.2
+	// calFactorMin raised 0.05 -> 0.15 (2026-08-11): at 0.05 the brief
+	// translated the 400k F floor into an ~8M raw claim — the mathematically
+	// correct way to say "ship nothing", and the loop obliged (75% of runs
+	// shipped zero). 0.15 reads ~2.7M: demanding but pitchable, and equal to
+	// the clamped conservative default, so cold starts and the floor agree.
+	calFactorMin = 0.15
+	calFactorMax = 1.2
 )
 
 type CalibrationRow struct {
@@ -40,6 +45,22 @@ type CalibrationRow struct {
 	NPace        int       `json:"n_pace"`
 	PaceRatio    *float64  `json:"pace_ratio"`
 	Factor       float64   `json:"factor"`
+	// Epoch is the measurement regime the row was computed under (see
+	// migration 015) — the dashboard draws the cut line from it.
+	Epoch int `json:"epoch"`
+}
+
+// EpochFor returns the archetype's current measurement epoch. The default
+// is 1 for everything; the fill-sim flag flip moves F to 2 (set from main
+// via Epochs). Strategies are stamped with it at insert; calibration
+// recomputes filter to it, so cross-regime samples never blend.
+func (s *Store) EpochFor(archetype string) int {
+	if s.Epochs != nil {
+		if e, ok := s.Epochs[archetype]; ok && e > 0 {
+			return e
+		}
+	}
+	return 1
 }
 
 // calibrationFactor multiplies the components, substituting conservative
@@ -71,7 +92,8 @@ func calibrationFactor(pSurvive, paceRatio *float64) float64 {
 // (harness projection when present, agent claim as legacy fallback) and
 // counts only post-anchor ticks, mirroring EvalStats.
 func (s *Store) RecomputeCalibration(ctx context.Context, archetype string) (*CalibrationRow, error) {
-	row := CalibrationRow{Archetype: archetype, WindowDays: CalWindowDays, SurviveHours: CalSurviveHours}
+	row := CalibrationRow{Archetype: archetype, WindowDays: CalWindowDays, SurviveHours: CalSurviveHours,
+		Epoch: s.EpochFor(archetype)}
 	var medPace *float64
 	err := s.Pool.QueryRow(ctx, `WITH closed AS (
 			SELECT st.strategy_id,
@@ -80,6 +102,7 @@ func (s *Store) RecomputeCalibration(ctx context.Context, archetype string) (*Ca
 			       coalesce(st.projected_per_1h_gp, st.per_1h_gp) AS proj_1h
 			FROM orchestrator.strategies st
 			WHERE st.archetype = $1
+			  AND st.eval_epoch = $4
 			  AND st.state IN ('killed','expired','confirmed')
 			  AND st.closed_at > now() - make_interval(days => $2)
 			  AND (st.archetype <> 'V' OR st.triggered_at IS NOT NULL)
@@ -96,7 +119,7 @@ func (s *Store) RecomputeCalibration(ctx context.Context, archetype string) (*Ca
 		       (SELECT count(*) FROM pace WHERE ratio IS NOT NULL),
 		       (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY ratio)::float8
 		        FROM pace WHERE ratio IS NOT NULL)`,
-		archetype, CalWindowDays, CalSurviveHours).
+		archetype, CalWindowDays, CalSurviveHours, row.Epoch).
 		Scan(&row.NClosed, &row.NSurvived, &row.NPace, &medPace)
 	if err != nil {
 		return nil, err
@@ -111,10 +134,10 @@ func (s *Store) RecomputeCalibration(ctx context.Context, archetype string) (*Ca
 	row.Factor = calibrationFactor(row.PSurvive, row.PaceRatio)
 
 	err = s.Pool.QueryRow(ctx, `INSERT INTO orchestrator.calibration
-			(archetype, window_days, survive_hours, n_closed, n_survived, p_survive, n_pace, pace_ratio, factor)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING computed_at`,
+			(archetype, window_days, survive_hours, n_closed, n_survived, p_survive, n_pace, pace_ratio, factor, epoch)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING computed_at`,
 		row.Archetype, row.WindowDays, row.SurviveHours, row.NClosed, row.NSurvived,
-		row.PSurvive, row.NPace, row.PaceRatio, row.Factor).
+		row.PSurvive, row.NPace, row.PaceRatio, row.Factor, row.Epoch).
 		Scan(&row.ComputedAt)
 	if err != nil {
 		return nil, err
@@ -123,12 +146,35 @@ func (s *Store) RecomputeCalibration(ctx context.Context, archetype string) (*Ca
 }
 
 const calibrationCols = `computed_at, archetype, window_days, survive_hours,
-	n_closed, n_survived, p_survive, n_pace, pace_ratio, factor`
+	n_closed, n_survived, p_survive, n_pace, pace_ratio, factor, epoch`
 
-// CalibrationLatest returns the newest row per archetype.
+// CalibrationLatest returns the newest row per archetype AT ITS CURRENT
+// EPOCH — a regime cut must not keep gating on the old regime's numbers.
+// Falls back to the newest row of any epoch when the current epoch has
+// none yet (pre-cut installs; the epoch-2 seed row covers the F cut).
 func (s *Store) CalibrationLatest(ctx context.Context) ([]CalibrationRow, error) {
-	return s.collectCalibrations(ctx, `SELECT DISTINCT ON (archetype) `+calibrationCols+`
-		FROM orchestrator.calibration ORDER BY archetype, computed_at DESC`)
+	all, err := s.collectCalibrations(ctx, `SELECT DISTINCT ON (archetype, epoch) `+calibrationCols+`
+		FROM orchestrator.calibration ORDER BY archetype, epoch, computed_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	best := map[string]CalibrationRow{}
+	for _, r := range all {
+		cur, ok := best[r.Archetype]
+		switch {
+		case !ok:
+			best[r.Archetype] = r
+		case r.Epoch == s.EpochFor(r.Archetype) && cur.Epoch != s.EpochFor(r.Archetype):
+			best[r.Archetype] = r
+		case r.Epoch == cur.Epoch && r.ComputedAt.After(cur.ComputedAt):
+			best[r.Archetype] = r
+		}
+	}
+	out := make([]CalibrationRow, 0, len(best))
+	for _, r := range best {
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 // CalibrationHistory returns the trailing-days history, oldest first — the

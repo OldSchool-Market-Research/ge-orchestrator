@@ -36,7 +36,8 @@ func (s *Store) Graveyard(ctx context.Context) ([]GraveyardRow, error) {
 			       max(coalesce(s.items->0->>'name', 'unknown item')) AS item_name,
 			       s.archetype,
 			       count(*) AS kills,
-			       sum(est.med_1h * greatest(extract(epoch from (s.closed_at - coalesce(s.triggered_at, s.opened_at)))/3600.0, 0)) AS est_realized,
+			       sum(coalesce(pos.final_equity_gp,
+			           est.med_1h * greatest(extract(epoch from (s.closed_at - coalesce(s.triggered_at, s.opened_at)))/3600.0, 0))) AS est_realized,
 			       max(s.closed_at) AS last_killed
 			FROM orchestrator.strategies s
 			JOIN LATERAL (
@@ -45,6 +46,7 @@ func (s *Store) Graveyard(ctx context.Context) ([]GraveyardRow, error) {
 				WHERE e.strategy_id = s.strategy_id
 				  AND (s.triggered_at IS NULL OR e.at >= s.triggered_at)
 			) est ON true
+			LEFT JOIN orchestrator.positions pos ON pos.strategy_id = s.strategy_id
 			WHERE s.state = 'killed'
 			  AND s.closed_at > now() - make_interval(days => $1)
 			GROUP BY s.primary_item_id, s.archetype
