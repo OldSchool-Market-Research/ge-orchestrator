@@ -323,6 +323,22 @@ func (ev *Evaluator) closeAndScore(ctx context.Context, st store.Strategy, state
 	if err := ev.Store.RecordStrategyOutcome(ctx, st.PrimaryItemID, name, st.Archetype, st.Sid, state); err != nil {
 		log.Printf("eval: watchlist outcome for %s (%s): %v", st.Sid, state, err)
 	}
+	if state == "confirmed" && st.Archetype == "C" && st.RelationID != nil {
+		// A confirmed conversion edge is mechanical and re-enters
+		// immediately: re-queue the combo signal (cooldown 0 bypasses
+		// dismissal memory) so the next run re-proves it at live prices,
+		// instead of the edge decaying on the 5-day watch revalidation.
+		// The confirm already closed this row, so open-book dedup cannot
+		// block the re-ship.
+		metrics := map[string]any{
+			"relation_id": *st.RelationID,
+			"prior_sid":   st.Sid,
+			"source":      "confirm_rearm",
+		}
+		if _, err := ev.Store.UpsertSignal(ctx, "combo", st.PrimaryItemID, name, metrics, 0); err != nil {
+			log.Printf("eval: combo re-arm for %s: %v", st.Sid, err)
+		}
+	}
 	ev.recalibrate(ctx, st.Archetype)
 	return nil
 }
