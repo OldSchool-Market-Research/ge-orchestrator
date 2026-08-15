@@ -338,7 +338,21 @@ func (s *Server) pnl(w http.ResponseWriter, r *http.Request) {
 			b.ProjectedGp += *row.ProjectedGp
 		}
 	}
+	// Quarantined rows (migration 016) stay in the strategies list with their
+	// bogus estimate and the reason, but poison no rollup — they get their
+	// own bucket so the totals stay honest without the break disappearing.
+	quarantined := bucket{}
 	for _, row := range rows {
+		if row.QuarantinedReason != nil {
+			quarantined.N++
+			if row.EstRealizedGp != nil {
+				quarantined.EstRealizedGp += *row.EstRealizedGp
+			}
+			if row.ProjectedGp != nil {
+				quarantined.ProjectedGp += *row.ProjectedGp
+			}
+			continue
+		}
 		total.N++
 		if row.EstRealizedGp != nil {
 			total.EstRealizedGp += *row.EstRealizedGp
@@ -366,6 +380,7 @@ func (s *Server) pnl(w http.ResponseWriter, r *http.Request) {
 		"total":        total,
 		"by_state":     byState,
 		"by_archetype": byArchetype,
+		"quarantined":  quarantined,
 		"strategies":   rows,
 	})
 }

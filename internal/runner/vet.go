@@ -33,6 +33,16 @@ const (
 	// margin_persistence_24h definition exactly (the number the agent cites
 	// must be the number the vetter enforces).
 	persistenceGateDenom = 24.0
+	// Lane-C no-arb cap (the moon-set incident, 2026-08-14): a GE-clerk set
+	// or Bob Barter decant is free and reversible, so players close any real
+	// sum-of-parts gap in minutes. A margin that is BOTH above this fraction
+	// of the sell side AND above the absolute floor cannot be edge — it is
+	// wrong recipe data. The Blood moon set's "5.35M premium" (28% of the
+	// set) was exactly the un-bought fourth component, and it booked 197M
+	// phantom realized before anyone smelled it. Legit set premiums run
+	// 1-3%; cheap-potion decants can exceed 10% only far below the floor.
+	noArbCapFraction = 0.10
+	noArbCapMinGp    = 500_000
 )
 
 // vet applies the ship-time rules a strategy must pass to enter the book.
@@ -72,6 +82,12 @@ const (
 //     clear the lane floor. Runs in log-only mode until
 //     GE_ORCH_CAL_VETO_MODE=enforce, so the first week measures how many
 //     ships it WOULD kill before it kills any.
+//  8. recipe integrity + no-arb (C) — the legs must be exactly the
+//     item_relations recipe the strategy cites (every component, either
+//     direction when reversible), and a free reversible conversion whose
+//     margin clears noArbCapFraction AND noArbCapMinGp is vetoed as wrong
+//     recipe data. The eval re-prices legs forever but can never notice a
+//     leg that isn't there — this is the only gate that can.
 //
 // Vet errors fail open (accept + log): a flaky price lookup must not turn
 // into a dropped research run. The same applies to the record-fed rules — a
@@ -172,6 +188,22 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 	if g, ok := rec.graveEntry(itemID, st.Archetype); ok {
 		if reason := graveyardVeto(g, r.Cfg.GraveyardCooldown, time.Now().UTC()); reason != "" {
 			return reason, nil
+		}
+	}
+
+	if st.Archetype == "C" {
+		var rel *store.Relation
+		lookupOK := true
+		if st.RelationID != nil {
+			if rel, err = r.Store.RelationByID(ctx, *st.RelationID); err != nil {
+				log.Printf("vet %s: relation %d lookup: %v", st.ID, *st.RelationID, err)
+				lookupOK = false // fail open, like every record-fed rule
+			}
+		}
+		if lookupOK {
+			if reason := comboRecipeVeto(st, rel); reason != "" {
+				return reason, nil
+			}
 		}
 	}
 
@@ -312,6 +344,73 @@ func flipPersistenceVeto(okHours, obsHours int, refMargin int64) string {
 	}
 	return fmt.Sprintf("vetoed at ship time: margin_persistence_24h %.2f below the %.2f lane-F gate (claimed post-tax margin %d held >= half its width in %d of 24 hours; both sides traded in %d)",
 		ratio, persistenceGateMin, refMargin, okHours, obsHours)
+}
+
+// comboRecipeVeto applies vet rule 8. rel == nil means the cited recipe does
+// not exist (or none was cited). The legs must be the recipe exactly — buy
+// the inputs and sell the outputs, or the reverse when the relation is
+// reversible — because the evaluator prices whatever legs it is handed: a
+// missing component doesn't degrade the margin, it BECOMES the margin.
+func comboRecipeVeto(st store.SidecarStrategy, rel *store.Relation) string {
+	if st.RelationID == nil {
+		return "vetoed at ship time: C strategy cites no relation_id (legs must come from combo_quote)"
+	}
+	if rel == nil {
+		return fmt.Sprintf("vetoed at ship time: relation_id %d not found in item_relations", *st.RelationID)
+	}
+	buys, sells := legQty(st.Legs, "buy"), legQty(st.Legs, "sell")
+	forward := legsMatch(buys, rel.Inputs) && legsMatch(sells, rel.Outputs)
+	reverse := rel.Reversible && legsMatch(buys, rel.Outputs) && legsMatch(sells, rel.Inputs)
+	if !forward && !reverse {
+		dir := "buy the inputs, sell the outputs"
+		if rel.Reversible {
+			dir += " (or the reverse)"
+		}
+		return fmt.Sprintf("vetoed at ship time: legs do not match relation %d (%s) — every component must be a leg: %s",
+			rel.RelationID, rel.Name, dir)
+	}
+	// No-arb cap: sets and decants are free, requirement-less NPC exchanges;
+	// combines can carry skill gates and fees (notes column) that let real
+	// margins persist, so they are exempt.
+	if rel.Kind != "combine" && rel.Reversible {
+		margin := st.ExitPrice - st.EntryPrice // per conversion, post-tax by contract
+		var gross int64
+		for _, l := range st.Legs {
+			if l.Side == "sell" {
+				gross += l.Price * l.Qty
+			}
+		}
+		if margin > noArbCapMinGp && gross > 0 && float64(margin) > noArbCapFraction*float64(gross) {
+			return fmt.Sprintf("vetoed at ship time: %d gp margin is %.0f%% of the %d gp sell side on a free reversible %s conversion — a standing gap that size is wrong recipe data, not edge (relation %d, %s)",
+				margin, 100*float64(margin)/float64(gross), gross, rel.Kind, rel.RelationID, rel.Name)
+		}
+	}
+	return ""
+}
+
+// legQty collapses one side's legs to item_id -> total qty.
+func legQty(legs []store.Leg, side string) map[int]int64 {
+	m := map[int]int64{}
+	for _, l := range legs {
+		if l.Side == side {
+			m[l.ItemID] += l.Qty
+		}
+	}
+	return m
+}
+
+// legsMatch reports whether the legs are exactly the recipe side: same
+// items, same per-conversion quantities, nothing missing, nothing extra.
+func legsMatch(got map[int]int64, want []store.RelationLeg) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for _, w := range want {
+		if got[w.ItemID] != w.Qty {
+			return false
+		}
+	}
+	return true
 }
 
 // evSanity recomputes a flip strategy's per-cycle ceiling from the live
