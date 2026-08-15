@@ -48,6 +48,7 @@ func (s *Store) Graveyard(ctx context.Context) ([]GraveyardRow, error) {
 			) est ON true
 			LEFT JOIN orchestrator.positions pos ON pos.strategy_id = s.strategy_id
 			WHERE s.state = 'killed'
+			  AND s.quarantined_reason IS NULL
 			  AND s.closed_at > now() - make_interval(days => $1)
 			GROUP BY s.primary_item_id, s.archetype
 		) g

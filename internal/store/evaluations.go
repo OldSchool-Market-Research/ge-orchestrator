@@ -151,6 +151,10 @@ type PnLRow struct {
 	// annotates the regime break instead of hiding it.
 	EvalEpoch int  `json:"eval_epoch"`
 	SimScored bool `json:"sim_scored,omitempty"`
+	// QuarantinedReason marks a strategy whose numbers are known-bad
+	// (migration 016) — the row stays listed with its bogus estimate AND the
+	// reason, but every rollup excludes it.
+	QuarantinedReason *string `json:"quarantined_reason,omitempty"`
 }
 
 // PnL returns per-strategy paper-trade estimates for every strategy that has
@@ -162,7 +166,7 @@ func (s *Store) PnL(ctx context.Context) ([]PnLRow, error) {
 		s.opened_at, s.closed_at,
 		greatest(extract(epoch from (coalesce(s.closed_at, now()) - coalesce(s.triggered_at, s.opened_at)))/3600.0, 0)::float8 AS hours,
 		est.med_1h::float8, coalesce(s.projected_per_1h_gp, s.per_1h_gp), s.capital_required,
-		s.eval_epoch, pos.final_equity_gp
+		s.eval_epoch, pos.final_equity_gp, s.quarantined_reason
 		FROM orchestrator.strategies s
 		JOIN LATERAL (
 			SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY e.realized_per_1h_gp) AS med_1h
@@ -183,7 +187,7 @@ func (s *Store) PnL(ctx context.Context) ([]PnLRow, error) {
 		var per1h, finalEquity *int64
 		if err := rows.Scan(&r.StrategyID, &r.Sid, &r.Title, &r.Archetype, &r.State,
 			&r.OpenedAt, &r.ClosedAt, &r.Hours, &r.MedRealized1h, &per1h, &r.Capital,
-			&r.EvalEpoch, &finalEquity); err != nil {
+			&r.EvalEpoch, &finalEquity, &r.QuarantinedReason); err != nil {
 			return nil, err
 		}
 		switch {

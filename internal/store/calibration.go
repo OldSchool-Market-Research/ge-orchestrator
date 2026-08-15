@@ -103,6 +103,7 @@ func (s *Store) RecomputeCalibration(ctx context.Context, archetype string) (*Ca
 			FROM orchestrator.strategies st
 			WHERE st.archetype = $1
 			  AND st.eval_epoch = $4
+			  AND st.quarantined_reason IS NULL
 			  AND st.state IN ('killed','expired','confirmed')
 			  AND st.closed_at > now() - make_interval(days => $2)
 			  AND (st.archetype <> 'V' OR st.triggered_at IS NOT NULL)
