@@ -69,11 +69,13 @@ func (r *Runner) ActiveRunID() int64 {
 	return r.active.runID
 }
 
-// Trigger starts a run with the given brief params. Returns the run id, or
-// ErrBusy if one is already in flight.
+// Trigger starts a run with the given brief params. source records why the
+// run happened (schedule|signal|empty|manual) — run legibility starts with
+// knowing what woke the agent. Returns the run id, or ErrBusy if one is
+// already in flight.
 var ErrBusy = fmt.Errorf("a run is already in progress")
 
-func (r *Runner) Trigger(ctx context.Context, p brief.Params) (int64, error) {
+func (r *Runner) Trigger(ctx context.Context, p brief.Params, source string) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.active != nil {
@@ -90,7 +92,7 @@ func (r *Runner) Trigger(ctx context.Context, p brief.Params) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	runID, err := r.Store.CreateRun(ctx, brief.MarshalParams(p), briefText)
+	runID, err := r.Store.CreateRun(ctx, brief.MarshalParams(p), briefText, source)
 	if err != nil {
 		return 0, err
 	}
@@ -178,6 +180,10 @@ func (r *Runner) execute(runID int64, workspace, briefPath string, run *activeRu
 	}
 
 	err = cmd.Wait()
+	// Cost record lands whatever the outcome — failed runs burn tokens too,
+	// and that is exactly when the burn must stay visible (run 924 burned 31
+	// minutes with no record; the plan died the same day).
+	r.ingestStats(ctx, runID, workspace)
 	reportPath := strings.TrimSpace(stdoutBuf.String())
 	if err != nil || reportPath == "" {
 		reason := "ge-agent exited without a report"
@@ -194,6 +200,34 @@ func (r *Runner) execute(runID int64, workspace, briefPath string, run *activeRu
 	}
 	r.Hub.Publish(runID, Event{Type: "finished", Data: map[string]any{"run_id": runID, "status": "succeeded"}})
 	log.Printf("run %d succeeded: %s", runID, reportPath)
+}
+
+// ingestStats persists the agent's cost sidecar (<report>.stats.json,
+// ge-agent >= 0.10.0). The per-run workspace holds exactly one run's
+// artifacts, so a glob finds it without knowing the report basename — which
+// stdout does not carry on failure. Absence is fine (old agent image, crash
+// before turn 1); a parse or DB error is log-worthy, never run-fatal.
+func (r *Runner) ingestStats(ctx context.Context, runID int64, workspace string) {
+	matches, err := filepath.Glob(filepath.Join(workspace, "reports", "*.stats.json"))
+	if err != nil || len(matches) == 0 {
+		return
+	}
+	raw, err := os.ReadFile(matches[len(matches)-1])
+	if err != nil {
+		log.Printf("run %d: read stats sidecar: %v", runID, err)
+		return
+	}
+	var c store.RunCosts
+	if err := json.Unmarshal(raw, &c); err != nil {
+		log.Printf("run %d: parse stats sidecar: %v", runID, err)
+		return
+	}
+	if err := r.Store.SetRunCosts(ctx, runID, c); err != nil {
+		log.Printf("run %d: persist run costs: %v", runID, err)
+		return
+	}
+	log.Printf("run %d: cost %d turns, %d tool calls, %d in / %d out tokens (peak %d, pruned %dB)",
+		runID, c.Turns, c.ToolCalls, c.InputTokens, c.OutputTokens, c.PeakInputTokens, c.PrunedBytes)
 }
 
 // ingest stores the report markdown + parses the sidecar strategies.

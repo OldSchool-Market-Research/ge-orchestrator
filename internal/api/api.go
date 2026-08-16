@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"time"
@@ -30,6 +32,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/runs", s.triggerRun)
 	mux.HandleFunc("GET /api/runs/{id}", s.getRun)
 	mux.HandleFunc("GET /api/runs/{id}/report", s.getReport)
+	mux.HandleFunc("GET /api/runs/{id}/stats", s.getRunStats)
 	mux.HandleFunc("GET /api/runs/{id}/events", s.streamEvents)
 	mux.HandleFunc("GET /api/strategies", s.listStrategies)
 	mux.HandleFunc("GET /api/strategies/{id}", s.getStrategy)
@@ -118,7 +121,7 @@ func (s *Server) triggerRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	runID, err := s.Runner.Trigger(r.Context(), p)
+	runID, err := s.Runner.Trigger(r.Context(), p, "manual")
 	if err == runner.ErrBusy {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "run in progress", "active_run_id": runID})
 		return
@@ -177,6 +180,29 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.Write([]byte(md))
+}
+
+// getRunStats serves the agent's full cost sidecar (per-turn token detail —
+// the summary lives on the run row). The file sits in the run's workspace;
+// the basename is unknown here (failure reports carry a -FAILED suffix), so
+// glob like the runner's ingest does.
+func (s *Server) getRunStats(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.runID(w, r)
+	if !ok {
+		return
+	}
+	matches, err := filepath.Glob(filepath.Join(s.Runner.Cfg.StateDir, "runs", fmt.Sprintf("%d", id), "reports", "*.stats.json"))
+	if err != nil || len(matches) == 0 {
+		writeErr(w, 404, "no stats recorded for this run")
+		return
+	}
+	raw, err := os.ReadFile(matches[len(matches)-1])
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(raw)
 }
 
 // streamEvents is the SSE feed for a run, with Last-Event-ID replay.

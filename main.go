@@ -135,7 +135,7 @@ func main() {
 			t := time.NewTicker(every)
 			defer t.Stop()
 			for range t.C {
-				if _, err := r.Trigger(ctx, brief.Defaults()); err == runner.ErrBusy {
+				if _, err := r.Trigger(ctx, brief.Defaults(), "schedule"); err == runner.ErrBusy {
 					log.Print("schedule: skipped, run in progress")
 				} else if err != nil {
 					log.Printf("schedule: trigger failed: %v", err)
@@ -175,7 +175,7 @@ func maybeTriggerOnEmpty(ctx context.Context, st *store.Store, r *runner.Runner,
 	if last != nil && time.Since(*last) < cooldown {
 		return
 	}
-	runID, err := r.Trigger(ctx, brief.Defaults())
+	runID, err := r.Trigger(ctx, brief.Defaults(), "empty")
 	if err == runner.ErrBusy {
 		return
 	}
@@ -201,7 +201,7 @@ func maybeTriggerOnSignals(ctx context.Context, st *store.Store, r *runner.Runne
 	if last != nil && time.Since(*last) < cooldown {
 		return
 	}
-	runID, err := r.Trigger(ctx, brief.Defaults())
+	runID, err := r.Trigger(ctx, brief.Defaults(), "signal")
 	if err == runner.ErrBusy {
 		return
 	}
