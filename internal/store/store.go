@@ -100,14 +100,47 @@ type Run struct {
 	ReportPath *string         `json:"report_path"`
 	FailReason *string         `json:"fail_reason"`
 	NStrats    int             `json:"n_strategies"`
+
+	// Why the run started (schedule|signal|empty|manual); nil on rows that
+	// predate migration 017.
+	TriggerSource *string `json:"trigger_source"`
+	// Cost record from the agent's stats sidecar; nil when the sidecar was
+	// absent (old agent image, or a crash before the first turn).
+	Turns           *int   `json:"turns"`
+	ToolCalls       *int   `json:"tool_calls"`
+	InputTokens     *int64 `json:"input_tokens"`
+	OutputTokens    *int64 `json:"output_tokens"`
+	PeakInputTokens *int64 `json:"peak_input_tokens"`
+	PrunedBytes     *int64 `json:"pruned_bytes"`
 }
 
-func (s *Store) CreateRun(ctx context.Context, brief json.RawMessage, briefText string) (int64, error) {
+func (s *Store) CreateRun(ctx context.Context, brief json.RawMessage, briefText, triggerSource string) (int64, error) {
 	var id int64
 	err := s.Pool.QueryRow(ctx,
-		`INSERT INTO orchestrator.runs (brief, brief_text) VALUES ($1, $2) RETURNING run_id`,
-		brief, briefText).Scan(&id)
+		`INSERT INTO orchestrator.runs (brief, brief_text, trigger_source) VALUES ($1, $2, $3) RETURNING run_id`,
+		brief, briefText, triggerSource).Scan(&id)
 	return id, err
+}
+
+// RunCosts is the slice of the agent's stats sidecar the orchestrator
+// persists (per-turn detail stays in the sidecar file).
+type RunCosts struct {
+	Turns           int   `json:"turns"`
+	ToolCalls       int   `json:"tool_calls"`
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	PeakInputTokens int64 `json:"peak_input_tokens"`
+	PrunedBytes     int64 `json:"pruned_bytes"`
+}
+
+func (s *Store) SetRunCosts(ctx context.Context, runID int64, c RunCosts) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE orchestrator.runs
+		SET turns=$2, tool_calls=$3, input_tokens=$4, output_tokens=$5,
+		    peak_input_tokens=$6, pruned_bytes=$7
+		WHERE run_id=$1`,
+		runID, c.Turns, c.ToolCalls, c.InputTokens, c.OutputTokens,
+		c.PeakInputTokens, c.PrunedBytes)
+	return err
 }
 
 func (s *Store) FinishRun(ctx context.Context, runID int64, status, reportPath, reportMd, failReason string) error {
@@ -132,7 +165,9 @@ func (s *Store) OrphanRunningRuns(ctx context.Context) (int64, error) {
 func (s *Store) Runs(ctx context.Context, limit int) ([]Run, error) {
 	rows, err := s.Pool.Query(ctx, `SELECT r.run_id, r.started_at, r.finished_at, r.status,
 		r.brief, r.brief_text, r.report_path, r.fail_reason,
-		(SELECT count(*) FROM orchestrator.strategies st WHERE st.run_id = r.run_id)
+		(SELECT count(*) FROM orchestrator.strategies st WHERE st.run_id = r.run_id),
+		r.trigger_source, r.turns, r.tool_calls, r.input_tokens, r.output_tokens,
+		r.peak_input_tokens, r.pruned_bytes
 		FROM orchestrator.runs r ORDER BY r.run_id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -142,7 +177,9 @@ func (s *Store) Runs(ctx context.Context, limit int) ([]Run, error) {
 	for rows.Next() {
 		var r Run
 		if err := rows.Scan(&r.RunID, &r.StartedAt, &r.FinishedAt, &r.Status,
-			&r.Brief, &r.BriefText, &r.ReportPath, &r.FailReason, &r.NStrats); err != nil {
+			&r.Brief, &r.BriefText, &r.ReportPath, &r.FailReason, &r.NStrats,
+			&r.TriggerSource, &r.Turns, &r.ToolCalls, &r.InputTokens, &r.OutputTokens,
+			&r.PeakInputTokens, &r.PrunedBytes); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -154,10 +191,14 @@ func (s *Store) Run(ctx context.Context, runID int64) (*Run, error) {
 	var r Run
 	err := s.Pool.QueryRow(ctx, `SELECT r.run_id, r.started_at, r.finished_at, r.status,
 		r.brief, r.brief_text, r.report_path, r.fail_reason,
-		(SELECT count(*) FROM orchestrator.strategies st WHERE st.run_id = r.run_id)
+		(SELECT count(*) FROM orchestrator.strategies st WHERE st.run_id = r.run_id),
+		r.trigger_source, r.turns, r.tool_calls, r.input_tokens, r.output_tokens,
+		r.peak_input_tokens, r.pruned_bytes
 		FROM orchestrator.runs r WHERE r.run_id = $1`, runID).
 		Scan(&r.RunID, &r.StartedAt, &r.FinishedAt, &r.Status,
-			&r.Brief, &r.BriefText, &r.ReportPath, &r.FailReason, &r.NStrats)
+			&r.Brief, &r.BriefText, &r.ReportPath, &r.FailReason, &r.NStrats,
+			&r.TriggerSource, &r.Turns, &r.ToolCalls, &r.InputTokens, &r.OutputTokens,
+			&r.PeakInputTokens, &r.PrunedBytes)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
