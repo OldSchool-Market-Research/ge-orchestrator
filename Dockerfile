@@ -3,7 +3,7 @@
 # deliberately — see each repo's VERSION). DIRECTIVE.md rides in from ge-agent.
 
 ARG GE_AGENT_IMAGE=ghcr.io/oldschool-market-research/ge-agent:0.10.0
-ARG GE_MCP_IMAGE=ghcr.io/oldschool-market-research/ge-mcp:0.6.0
+ARG GE_MCP_IMAGE=ghcr.io/oldschool-market-research/ge-mcp:0.6.1
 
 FROM ${GE_AGENT_IMAGE} AS agent
 FROM ${GE_MCP_IMAGE}   AS mcp
