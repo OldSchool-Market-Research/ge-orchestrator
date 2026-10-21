@@ -48,3 +48,24 @@ func (s *Store) RelationByID(ctx context.Context, id int) (*Relation, error) {
 	}
 	return &rel, nil
 }
+
+// BuyLimits returns each item's GE 4-hour buy limit; items without a known
+// limit are left out of the map.
+func (s *Store) BuyLimits(ctx context.Context, ids []int) (map[int]int64, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT item_id, buy_limit FROM items
+		WHERE item_id = ANY($1) AND buy_limit > 0`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int]int64{}
+	for rows.Next() {
+		var id int
+		var limit int64
+		if err := rows.Scan(&id, &limit); err != nil {
+			return nil, err
+		}
+		out[id] = limit
+	}
+	return out, rows.Err()
+}

@@ -205,6 +205,16 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 				return reason, nil
 			}
 		}
+		buys := legQty(st.Legs, "buy")
+		ids := make([]int, 0, len(buys))
+		for id := range buys {
+			ids = append(ids, id)
+		}
+		if limits, err := r.Store.BuyLimits(ctx, ids); err != nil {
+			log.Printf("vet %s: buy limits: %v", st.ID, err) // fail open
+		} else if reason := comboBuyLimitVeto(st, limits); reason != "" {
+			return reason, nil
+		}
 	}
 
 	var snap *eval.Snap
@@ -383,6 +393,25 @@ func comboRecipeVeto(st store.SidecarStrategy, rel *store.Relation) string {
 		if margin > noArbCapMinGp && gross > 0 && float64(margin) > noArbCapFraction*float64(gross) {
 			return fmt.Sprintf("vetoed at ship time: %d gp margin is %.0f%% of the %d gp sell side on a free reversible %s conversion — a standing gap that size is wrong recipe data, not edge (relation %d, %s)",
 				margin, 100*float64(margin)/float64(gross), gross, rel.Kind, rel.RelationID, rel.Name)
+		}
+	}
+	return ""
+}
+
+// comboBuyLimitVeto: size.units_used counts conversions, and each one buys
+// qty of every buy leg, so the GE's 4-hour limit allows limit/qty of them
+// for the tightest leg. Reading the per-item limit as conversions shipped
+// 4-for-3 decants at 4x their real size (strategies 1606/1724), inflating
+// both the projection and the realized record. Unknown limits fail open.
+func comboBuyLimitVeto(st store.SidecarStrategy, limits map[int]int64) string {
+	for id, qty := range legQty(st.Legs, "buy") {
+		limit := limits[id]
+		if limit <= 0 || qty <= 0 {
+			continue
+		}
+		if need := qty * st.Size.UnitsUsed; need > limit {
+			return fmt.Sprintf("vetoed at ship time: units_used %d conversions x %d of item %d = %d per 4h, over its buy limit of %d — units_used counts conversions, at most %d here",
+				st.Size.UnitsUsed, qty, id, need, limit, limit/qty)
 		}
 	}
 	return ""
