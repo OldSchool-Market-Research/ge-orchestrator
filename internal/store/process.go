@@ -19,11 +19,12 @@ import (
 // this database yet (it ships as a manual ge-data DDL step).
 var ErrProcessUnavailable = errors.New("processing schema (ge-data init/04-06) is not applied or not readable")
 
-// processErr maps a missing relation (42P01) or a missing grant (42501, DDL
-// applied by a role other than ge-data) to ErrProcessUnavailable.
+// processErr maps a missing relation (42P01), a missing grant (42501, DDL
+// applied by a role other than ge-data) or a missing column (42703, this
+// binary ahead of a ge-data view change) to ErrProcessUnavailable.
 func processErr(err error) error {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && (pgErr.Code == "42P01" || pgErr.Code == "42501") {
+	if errors.As(err, &pgErr) && (pgErr.Code == "42P01" || pgErr.Code == "42501" || pgErr.Code == "42703") {
 		return ErrProcessUnavailable
 	}
 	return err

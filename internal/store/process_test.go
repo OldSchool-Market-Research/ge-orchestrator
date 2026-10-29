@@ -63,7 +63,7 @@ func TestProcessReads(t *testing.T) {
 // relation or a missing grant is "unavailable" (503), anything else passes
 // through (500).
 func TestProcessErr(t *testing.T) {
-	for code, want := range map[string]bool{"42P01": true, "42501": true, "23505": false} {
+	for code, want := range map[string]bool{"42P01": true, "42501": true, "42703": true, "23505": false} {
 		got := errors.Is(processErr(&pgconn.PgError{Code: code}), ErrProcessUnavailable)
 		if got != want {
 			t.Errorf("code %s: unavailable=%v, want %v", code, got, want)
