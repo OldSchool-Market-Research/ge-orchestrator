@@ -23,6 +23,8 @@ type Server struct {
 	Store     *store.Store
 	Runner    *runner.Runner
 	Evaluator *eval.Evaluator
+
+	items itemsCache // GET /api/items, see items.go
 }
 
 func (s *Server) Handler() http.Handler {
@@ -45,6 +47,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/signals", s.listSignals)
 	mux.HandleFunc("GET /api/trends", s.listTrends)
 	mux.HandleFunc("GET /api/calibration", s.calibration)
+	mux.HandleFunc("GET /api/items", s.listItems)
+	mux.HandleFunc("GET /api/items/{id}", s.getItem)
+	mux.HandleFunc("GET /api/items/{id}/history", s.itemHistory)
 	mux.HandleFunc("GET /api/process", s.listProcess)
 	mux.HandleFunc("GET /api/process/top", s.processTop)
 	mux.HandleFunc("GET /api/process/{id}", s.getProcess)
