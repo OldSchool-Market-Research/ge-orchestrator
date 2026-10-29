@@ -45,6 +45,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/signals", s.listSignals)
 	mux.HandleFunc("GET /api/trends", s.listTrends)
 	mux.HandleFunc("GET /api/calibration", s.calibration)
+	mux.HandleFunc("GET /api/process", s.listProcess)
+	mux.HandleFunc("GET /api/process/top", s.processTop)
+	mux.HandleFunc("GET /api/process/{id}", s.getProcess)
+	mux.HandleFunc("GET /api/process/{id}/history", s.processHistory)
 	return mux
 }
 
