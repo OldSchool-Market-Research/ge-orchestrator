@@ -17,11 +17,13 @@ import (
 
 // ErrProcessUnavailable means the processing schema hasn't been applied to
 // this database yet (it ships as a manual ge-data DDL step).
-var ErrProcessUnavailable = errors.New("processing schema (ge-data init/04-06) is not applied")
+var ErrProcessUnavailable = errors.New("processing schema (ge-data init/04-06) is not applied or not readable")
 
+// processErr maps a missing relation (42P01) or a missing grant (42501, DDL
+// applied by a role other than ge-data) to ErrProcessUnavailable.
 func processErr(err error) error {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+	if errors.As(err, &pgErr) && (pgErr.Code == "42P01" || pgErr.Code == "42501") {
 		return ErrProcessUnavailable
 	}
 	return err
@@ -43,20 +45,29 @@ type ProcessQuote struct {
 	EffectiveActionsPerHour *float64 `json:"effective_actions_per_hour"`
 	LimitActionsPerHour     *float64 `json:"limit_actions_per_hour"`
 	MarketActionsPerHour    *float64 `json:"market_actions_per_hour"`
-	FeeGp                   float64  `json:"fee_gp"`
-	MissingLegs             int64    `json:"missing_legs"`
-	MaxLegAgeS              *int64   `json:"max_leg_age_s"`
+	// insta orders fill against the other side of the book (ge-data 06)
+	EffectiveActionsPerHourInsta *float64 `json:"effective_actions_per_hour_insta"`
+	MarketActionsPerHourInsta    *float64 `json:"market_actions_per_hour_insta"`
+	FeeGp                        float64  `json:"fee_gp"`
+	MissingLegs                  int64    `json:"missing_legs"`
+	MissingLegsInsta             int64    `json:"missing_legs_insta"`
+	UnknownLimitLegs             int64    `json:"unknown_limit_legs"`
+	MaxLegAgeS                   *int64   `json:"max_leg_age_s"`
 }
 
 const processQuoteCols = `recipe_id, name, category, throughput, margin_slow, margin_insta, gp_hr,
   gp_hr_insta, gp_hr_theoretical, actions_per_hour, effective_actions_per_hour,
-  limit_actions_per_hour, market_actions_per_hour, fee_gp, missing_legs, max_leg_age_s`
+  limit_actions_per_hour, market_actions_per_hour, effective_actions_per_hour_insta,
+  market_actions_per_hour_insta, fee_gp, missing_legs, missing_legs_insta,
+  unknown_limit_legs, max_leg_age_s`
 
 func scanProcessQuote(row pgx.Row) (ProcessQuote, error) {
 	var q ProcessQuote
 	err := row.Scan(&q.RecipeID, &q.Name, &q.Category, &q.Throughput, &q.MarginSlow, &q.MarginInsta,
 		&q.GpHr, &q.GpHrInsta, &q.GpHrTheoretical, &q.ActionsPerHour, &q.EffectiveActionsPerHour,
-		&q.LimitActionsPerHour, &q.MarketActionsPerHour, &q.FeeGp, &q.MissingLegs, &q.MaxLegAgeS)
+		&q.LimitActionsPerHour, &q.MarketActionsPerHour, &q.EffectiveActionsPerHourInsta,
+		&q.MarketActionsPerHourInsta, &q.FeeGp, &q.MissingLegs, &q.MissingLegsInsta,
+		&q.UnknownLimitLegs, &q.MaxLegAgeS)
 	return q, err
 }
 
@@ -91,7 +102,7 @@ type ProcessLeg struct {
 	BuyLimit      *int64   `json:"buy_limit"`
 	PriceSlow     *int64   `json:"price_slow"`
 	PriceInsta    *int64   `json:"price_insta"`
-	AgeS          *int64   `json:"age_s"`
+	SlowAgeS      *int64   `json:"slow_age_s"` // age of the price_slow quote
 	FillVolume24h *float64 `json:"fill_volume_24h"`
 }
 
@@ -105,10 +116,18 @@ type ProcessDetail struct {
 	Legs              []ProcessLeg `json:"legs"`
 }
 
-// ProcessDetailByID returns (nil, nil) for an unknown recipe_id.
+// ProcessDetailByID returns (nil, nil) for an unknown recipe_id. Recipe,
+// quote and legs are read in one read-only snapshot (one now()), so the leg
+// prices reproduce the quote even if a price row lands between statements.
 func (s *Store) ProcessDetailByID(ctx context.Context, id int) (*ProcessDetail, error) {
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
 	var d ProcessDetail
-	err := s.Pool.QueryRow(ctx, `SELECT source, relation_name, relation_direction, notes
+	err = tx.QueryRow(ctx, `SELECT source, relation_name, relation_direction, notes
 		FROM process_recipes WHERE recipe_id = $1`, id).Scan(&d.Source, &d.RelationName, &d.RelationDirection, &d.Notes)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -116,11 +135,11 @@ func (s *Store) ProcessDetailByID(ctx context.Context, id int) (*ProcessDetail, 
 	if err != nil {
 		return nil, processErr(err)
 	}
-	if d.Quote, err = scanProcessQuote(s.Pool.QueryRow(ctx,
+	if d.Quote, err = scanProcessQuote(tx.QueryRow(ctx,
 		`SELECT `+processQuoteCols+` FROM process_quotes_now WHERE recipe_id = $1`, id)); err != nil {
 		return nil, processErr(err)
 	}
-	rows, err := s.Pool.Query(ctx, `
+	rows, err := tx.Query(ctx, `
 		SELECT side, item_id, name, qty, buy_limit,
 		       CASE side WHEN 'buy' THEN low ELSE high END,
 		       CASE side WHEN 'buy' THEN high ELSE low END,
@@ -134,7 +153,7 @@ func (s *Store) ProcessDetailByID(ctx context.Context, id int) (*ProcessDetail, 
 	d.Legs = []ProcessLeg{}
 	for rows.Next() {
 		var l ProcessLeg
-		if err := rows.Scan(&l.Side, &l.ItemID, &l.Name, &l.Qty, &l.BuyLimit, &l.PriceSlow, &l.PriceInsta, &l.AgeS, &l.FillVolume24h); err != nil {
+		if err := rows.Scan(&l.Side, &l.ItemID, &l.Name, &l.Qty, &l.BuyLimit, &l.PriceSlow, &l.PriceInsta, &l.SlowAgeS, &l.FillVolume24h); err != nil {
 			return nil, err
 		}
 		d.Legs = append(d.Legs, l)
@@ -143,7 +162,8 @@ func (s *Store) ProcessDetailByID(ctx context.Context, id int) (*ProcessDetail, 
 }
 
 // ProcessHistoryPoint is one time bucket of a recipe's snapshots. Averages
-// cover priced hours only; PricedHours < Hours marks unpriceable stretches.
+// cover hours with a value; PricedHours (hours with a margin) < Hours marks
+// unpriceable stretches.
 type ProcessHistoryPoint struct {
 	Bucket                  time.Time `json:"bucket"`
 	MarginSlow              *float64  `json:"margin_slow"`
@@ -185,7 +205,8 @@ type ProcessTopRow struct {
 	Name             string   `json:"name"`
 	Category         string   `json:"category"`
 	Hours            int64    `json:"hours"`
-	PricedHours      int64    `json:"priced_hours"`
+	PricedHours      int64    `json:"priced_hours"` // hours with a margin
+	MetricHours      int64    `json:"metric_hours"` // hours with the ranked metric
 	Avg              *float64 `json:"avg"`
 	Median           *float64 `json:"median"`
 	P25              *float64 `json:"p25"`
@@ -200,18 +221,21 @@ type ProcessTopRow struct {
 var processTopMetrics = map[string]bool{"gp_hr": true, "gp_hr_insta": true, "margin_slow": true}
 
 // ProcessTop ranks recipes by the median of metric over hourly snapshots since
-// `since`. hours_in_top10 ranks per hour across all recipes.
-func (s *Store) ProcessTop(ctx context.Context, metric string, since time.Time, limit int) ([]ProcessTopRow, error) {
+// `since` (avg/median/p25 over hours with the metric). hours_in_top10 ranks per
+// hour across all recipes. A recipe with the metric in fewer than
+// minCoveragePct of its hours is left out, so a mostly-unpriceable recipe
+// can't top the list on a few good hours.
+func (s *Store) ProcessTop(ctx context.Context, metric string, since time.Time, limit, minCoveragePct int) ([]ProcessTopRow, error) {
 	if !processTopMetrics[metric] {
 		return nil, errors.New("unknown process metric " + metric)
 	}
 	rows, err := s.Pool.Query(ctx, `
 		WITH s AS (
-		  SELECT recipe_id, ts, `+metric+` AS v,
+		  SELECT recipe_id, ts, margin_slow, `+metric+` AS v,
 		         rank() OVER (PARTITION BY ts ORDER BY `+metric+` DESC NULLS LAST) AS rk
 		  FROM process_snapshots WHERE ts >= $1
 		)
-		SELECT s.recipe_id, p.name, p.category, count(*), count(s.v),
+		SELECT s.recipe_id, p.name, p.category, count(*), count(s.margin_slow), count(s.v),
 		       round(avg(s.v)),
 		       round(percentile_cont(0.5)  WITHIN GROUP (ORDER BY s.v)::numeric),
 		       round(percentile_cont(0.25) WITHIN GROUP (ORDER BY s.v)::numeric),
@@ -220,8 +244,9 @@ func (s *Store) ProcessTop(ctx context.Context, metric string, since time.Time, 
 		       round(avg(s.v) FILTER (WHERE s.ts >= now() - interval '24 hours'))
 		FROM s JOIN process_recipes p USING (recipe_id)
 		GROUP BY s.recipe_id, p.name, p.category
-		ORDER BY 7 DESC NULLS LAST, s.recipe_id
-		LIMIT $2`, since, limit)
+		HAVING count(s.v) >= $3::numeric / 100 * count(*)
+		ORDER BY 8 DESC NULLS LAST, s.recipe_id
+		LIMIT $2`, since, limit, minCoveragePct)
 	if err != nil {
 		return nil, processErr(err)
 	}
@@ -229,7 +254,7 @@ func (s *Store) ProcessTop(ctx context.Context, metric string, since time.Time, 
 	out := []ProcessTopRow{}
 	for rows.Next() {
 		var r ProcessTopRow
-		if err := rows.Scan(&r.RecipeID, &r.Name, &r.Category, &r.Hours, &r.PricedHours, &r.Avg, &r.Median,
+		if err := rows.Scan(&r.RecipeID, &r.Name, &r.Category, &r.Hours, &r.PricedHours, &r.MetricHours, &r.Avg, &r.Median,
 			&r.P25, &r.PctHoursPositive, &r.HoursInTop10, &r.AvgLast24h); err != nil {
 			return nil, err
 		}

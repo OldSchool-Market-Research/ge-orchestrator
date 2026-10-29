@@ -117,7 +117,16 @@ func (s *Server) processTop(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	rows, err := s.Store.ProcessTop(r.Context(), metric, since, limit)
+	coverage := 50
+	if c := r.URL.Query().Get("min_coverage_pct"); c != "" {
+		n, err := strconv.Atoi(c)
+		if err != nil || n < 0 || n > 100 {
+			writeErr(w, 400, "min_coverage_pct must be 0..100")
+			return
+		}
+		coverage = n
+	}
+	rows, err := s.Store.ProcessTop(r.Context(), metric, since, limit, coverage)
 	if err != nil {
 		processFail(w, err)
 		return

@@ -49,10 +49,10 @@ func TestProcessReads(t *testing.T) {
 	if _, err := s.ProcessHistory(ctx, quotes[0].RecipeID, since, "1 day"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ProcessTop(ctx, "gp_hr", since, 5); err != nil {
+	if _, err := s.ProcessTop(ctx, "gp_hr", since, 5, 50); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ProcessTop(ctx, "gp_hr; DROP TABLE items", since, 5); err == nil {
+	if _, err := s.ProcessTop(ctx, "gp_hr; DROP TABLE items", since, 5, 50); err == nil {
 		t.Fatal("ProcessTop accepted a metric outside the closed set")
 	}
 }
