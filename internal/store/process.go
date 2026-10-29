@@ -19,11 +19,12 @@ import (
 // this database yet (it ships as a manual ge-data DDL step).
 var ErrProcessUnavailable = errors.New("processing schema (ge-data init/04-06) is not applied or not readable")
 
-// processErr maps a missing relation (42P01) or a missing grant (42501, DDL
-// applied by a role other than ge-data) to ErrProcessUnavailable.
+// processErr maps a missing relation (42P01), a missing grant (42501, DDL
+// applied by a role other than ge-data) or a missing column (42703, this
+// binary ahead of a ge-data view change) to ErrProcessUnavailable.
 func processErr(err error) error {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && (pgErr.Code == "42P01" || pgErr.Code == "42501") {
+	if errors.As(err, &pgErr) && (pgErr.Code == "42P01" || pgErr.Code == "42501" || pgErr.Code == "42703") {
 		return ErrProcessUnavailable
 	}
 	return err
@@ -53,13 +54,15 @@ type ProcessQuote struct {
 	MissingLegsInsta             int64    `json:"missing_legs_insta"`
 	UnknownLimitLegs             int64    `json:"unknown_limit_legs"`
 	MaxLegAgeS                   *int64   `json:"max_leg_age_s"`
+	// display only: the main output's /mapping icon file (ge-data 06)
+	Icon *string `json:"icon"`
 }
 
 const processQuoteCols = `recipe_id, name, category, throughput, margin_slow, margin_insta, gp_hr,
   gp_hr_insta, gp_hr_theoretical, actions_per_hour, effective_actions_per_hour,
   limit_actions_per_hour, market_actions_per_hour, effective_actions_per_hour_insta,
   market_actions_per_hour_insta, fee_gp, missing_legs, missing_legs_insta,
-  unknown_limit_legs, max_leg_age_s`
+  unknown_limit_legs, max_leg_age_s, icon`
 
 func scanProcessQuote(row pgx.Row) (ProcessQuote, error) {
 	var q ProcessQuote
@@ -67,7 +70,7 @@ func scanProcessQuote(row pgx.Row) (ProcessQuote, error) {
 		&q.GpHr, &q.GpHrInsta, &q.GpHrTheoretical, &q.ActionsPerHour, &q.EffectiveActionsPerHour,
 		&q.LimitActionsPerHour, &q.MarketActionsPerHour, &q.EffectiveActionsPerHourInsta,
 		&q.MarketActionsPerHourInsta, &q.FeeGp, &q.MissingLegs, &q.MissingLegsInsta,
-		&q.UnknownLimitLegs, &q.MaxLegAgeS)
+		&q.UnknownLimitLegs, &q.MaxLegAgeS, &q.Icon)
 	return q, err
 }
 
@@ -109,6 +112,7 @@ type ProcessLeg struct {
 	PriceInsta    *int64   `json:"price_insta"`
 	SlowAgeS      *int64   `json:"slow_age_s"` // age of the price_slow quote
 	FillVolume24h *float64 `json:"fill_volume_24h"`
+	Icon          *string  `json:"icon"` // /mapping icon file, display only
 }
 
 // ProcessDetail is one recipe: its curation fields, live quote and legs.
@@ -149,7 +153,8 @@ func (s *Store) ProcessDetailByID(ctx context.Context, id int) (*ProcessDetail, 
 		       CASE side WHEN 'buy' THEN low ELSE high END,
 		       CASE side WHEN 'buy' THEN high ELSE low END,
 		       extract(epoch FROM now() - CASE side WHEN 'buy' THEN low_time ELSE high_time END)::bigint,
-		       CASE side WHEN 'buy' THEN low_vol_24h ELSE high_vol_24h END
+		       CASE side WHEN 'buy' THEN low_vol_24h ELSE high_vol_24h END,
+		       icon
 		FROM process_legs_now WHERE recipe_id = $1 ORDER BY side, item_id`, id)
 	if err != nil {
 		return nil, processErr(err)
@@ -158,7 +163,7 @@ func (s *Store) ProcessDetailByID(ctx context.Context, id int) (*ProcessDetail, 
 	d.Legs = []ProcessLeg{}
 	for rows.Next() {
 		var l ProcessLeg
-		if err := rows.Scan(&l.Side, &l.ItemID, &l.Name, &l.Qty, &l.BuyLimit, &l.PriceSlow, &l.PriceInsta, &l.SlowAgeS, &l.FillVolume24h); err != nil {
+		if err := rows.Scan(&l.Side, &l.ItemID, &l.Name, &l.Qty, &l.BuyLimit, &l.PriceSlow, &l.PriceInsta, &l.SlowAgeS, &l.FillVolume24h, &l.Icon); err != nil {
 			return nil, processErr(err)
 		}
 		d.Legs = append(d.Legs, l)

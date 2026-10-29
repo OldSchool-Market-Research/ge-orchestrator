@@ -25,10 +25,16 @@ func TestProcessReads(t *testing.T) {
 	}
 	defer s.Pool.Close()
 
-	quotes, err := s.ProcessQuotes(ctx)
-	if errors.Is(err, ErrProcessUnavailable) {
+	// skip only when the views genuinely aren't there: a misspelled column in
+	// our own SQL also maps to ErrProcessUnavailable (42703) and must fail
+	var present bool
+	if err := s.Pool.QueryRow(ctx, `SELECT to_regclass('public.process_quotes_now') IS NOT NULL`).Scan(&present); err != nil {
+		t.Fatal(err)
+	}
+	if !present {
 		t.Skip("processing schema not applied")
 	}
+	quotes, err := s.ProcessQuotes(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +69,7 @@ func TestProcessReads(t *testing.T) {
 // relation or a missing grant is "unavailable" (503), anything else passes
 // through (500).
 func TestProcessErr(t *testing.T) {
-	for code, want := range map[string]bool{"42P01": true, "42501": true, "23505": false} {
+	for code, want := range map[string]bool{"42P01": true, "42501": true, "42703": true, "23505": false} {
 		got := errors.Is(processErr(&pgconn.PgError{Code: code}), ErrProcessUnavailable)
 		if got != want {
 			t.Errorf("code %s: unavailable=%v, want %v", code, got, want)
