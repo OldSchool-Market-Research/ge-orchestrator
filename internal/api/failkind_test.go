@@ -116,21 +116,21 @@ func TestClassifyFail(t *testing.T) {
 			reason: wrap + "ge-agent: 2026/10/19 10:26:27   tool item_history (err=true, 68 bytes) | " +
 				"ge-agent: 2026/10/19 10:26:27   tool item_history (err=false, 3937 bytes)",
 			kind:   "other",
-			detail: "ge-agent failed: exit status 1; tail: ge-agent: 2026/10/19 10:26:27   tool item_history (err=true, 68 bytes) | ge-agent:",
+			detail: "tool item_history (err=false, 3937 bytes)",
 		},
 		{
 			name: "model gave up after end_turn, not max_tokens (run 1184)",
 			reason: wrap + "ge-agent: 2026/09/11 03:54:29 turn 61: stop=end_turn in=181 out=325 pruned=406070B | " +
 				"ge-agent: 2026/09/11 03:54:29 model ended without submit_report after 2 nudges",
 			kind:   "other",
-			detail: "ge-agent failed: exit status 1; tail: ge-agent: 2026/09/11 03:54:29 turn 61: stop=end_turn in=181 out=325 pruned=406070B",
+			detail: "model ended without submit_report after 2 nudges",
 		},
 		{
 			name: "LLM overloaded (run 8525)",
 			reason: wrap + "ge-agent: 2026/10/24 03:03:59 llm: attempt 3/4 failed (llm http 529: overloaded_error: overloaded_error (529)), retrying in 15s | " +
 				"ge-agent: 2026/10/24 03:04:15 turn 1: llm http 529: overloaded_error: overloaded_error (529)",
 			kind:   "other",
-			detail: "ge-agent failed: exit status 1; tail: ge-agent: 2026/10/24 03:03:59 llm: attempt 3/4 failed (llm http 529: overloaded_er",
+			detail: "llm http 529: overloaded_error: overloaded_error (529)",
 		},
 		{
 			name:   "ingest failure (run 534)",

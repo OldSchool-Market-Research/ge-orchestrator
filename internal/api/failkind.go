@@ -44,6 +44,7 @@ var (
 	// agent's log.Printf timestamp.
 	reLinePrefix = regexp.MustCompile(`^(?:.*?; tail: )?ge-agent: \d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\s+`)
 	reToolError  = regexp.MustCompile(`^tool (\S+?)(?: \(err=true\b|: )`)
+	reTurnPrefix = regexp.MustCompile(`^turn \d+: `)
 )
 
 const tailSep = " | "
@@ -85,6 +86,13 @@ func classifyFail(reason string) (kind, detail string) {
 		return failToolError, m[1]
 	}
 
+	// An agent tail's first 120 runes are the runner's wrapper and the
+	// oldest, timestamped tail line; the last line is what ended the run
+	// ("turn 1: llm http 429: ...", "context deadline exceeded"), and without
+	// its timestamp and turn number equal causes group together.
+	if strings.Contains(reason, "ge-agent: ") {
+		return failOther, truncRunes(strings.TrimSpace(reTurnPrefix.ReplaceAllString(last, "")), 120)
+	}
 	return failOther, strings.TrimSpace(truncRunes(reason, 120))
 }
 
