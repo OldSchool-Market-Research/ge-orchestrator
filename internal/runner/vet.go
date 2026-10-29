@@ -17,6 +17,7 @@ import (
 const (
 	floorFPerCycleGp = 400_000
 	floorBPerCycleGp = 100_000
+	floorCPerCycleGp = 200_000
 	// evSanityFactor caps how far a claimed per-cycle EV may exceed the
 	// live recomputation (margin x fillable units) before it is vetoed.
 	evSanityFactor = 2
@@ -205,6 +206,19 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 				return reason, nil
 			}
 		}
+		buys := legQty(st.Legs, "buy")
+		ids := make([]int, 0, len(buys))
+		for id := range buys {
+			ids = append(ids, id)
+		}
+		if limits, err := r.Store.BuyLimits(ctx, ids); err != nil {
+			log.Printf("vet %s: buy limits: %v", st.ID, err) // fail open
+		} else if reason := comboBuyLimitVeto(st, limits); reason != "" {
+			return reason, nil
+		}
+		if reason := comboFloorVeto(st); reason != "" {
+			return reason, nil
+		}
 	}
 
 	var snap *eval.Snap
@@ -386,6 +400,61 @@ func comboRecipeVeto(st store.SidecarStrategy, rel *store.Relation) string {
 		}
 	}
 	return ""
+}
+
+// comboBuyLimitVeto: size.units_used counts conversions, and each one buys
+// qty of every buy leg, so the GE's 4-hour limit allows limit/qty of them
+// for the tightest leg. Reading the per-item limit as conversions shipped
+// 4-for-3 decants at 4x their real size (strategies 1606/1724), inflating
+// both the projection and the realized record. Unknown limits fail open.
+// The reported bound is the tightest over all buy legs (min limit/qty, what
+// combo_quote calls units_bound_per_4h), deterministic whatever the leg order.
+func comboBuyLimitVeto(st store.SidecarStrategy, limits map[int]int64) string {
+	bound := int64(-1)
+	var tightID int
+	var tightQty, tightLim int64
+	for id, qty := range legQty(st.Legs, "buy") {
+		limit := limits[id]
+		if limit <= 0 || qty <= 0 {
+			continue
+		}
+		if b := limit / qty; bound < 0 || b < bound || (b == bound && id < tightID) {
+			bound, tightID, tightQty, tightLim = b, id, qty, limit
+		}
+	}
+	if bound < 0 || st.Size.UnitsUsed <= bound {
+		return ""
+	}
+	name := legName(st.Legs, tightID)
+	if bound == 0 {
+		return fmt.Sprintf("vetoed at ship time: each conversion buys %d %s but its buy limit is %d per 4h — untradeable within the buy limit",
+			tightQty, name, tightLim)
+	}
+	return fmt.Sprintf("vetoed at ship time: units_used %d conversions x %d %s = %d per 4h, over its buy limit of %d — units_used counts conversions, at most %d here",
+		st.Size.UnitsUsed, tightQty, name, tightQty*st.Size.UnitsUsed, tightLim, bound)
+}
+
+// comboFloorVeto re-checks the C ship floor on the strategy's own numbers,
+// not its per_cycle_gp claim: entry/exit are per conversion (post-tax exit),
+// so one 4h batch earns (exit - entry) x units_used. A model that shrinks
+// units_used to fit the buy limit and keeps its old claim lands here.
+func comboFloorVeto(st store.SidecarStrategy) string {
+	margin := st.ExitPrice - st.EntryPrice
+	if per := margin * st.Size.UnitsUsed; per < floorCPerCycleGp {
+		return fmt.Sprintf("vetoed at ship time: (exit %d - entry %d) x %d conversions = %d gp per 4h batch, under the C floor of %d",
+			st.ExitPrice, st.EntryPrice, st.Size.UnitsUsed, per, floorCPerCycleGp)
+	}
+	return ""
+}
+
+// legName is the strategy's own name for an item on its legs (item id if absent).
+func legName(legs []store.Leg, id int) string {
+	for _, l := range legs {
+		if l.ItemID == id && l.Name != "" {
+			return l.Name
+		}
+	}
+	return fmt.Sprintf("item %d", id)
 }
 
 // legQty collapses one side's legs to item_id -> total qty.

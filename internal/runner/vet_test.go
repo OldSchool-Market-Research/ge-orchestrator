@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -192,6 +193,63 @@ func TestComboRecipeVetoIntegrity(t *testing.T) {
 	st.RelationID = nil
 	if reason := comboRecipeVeto(st, rel); reason == "" {
 		t.Error("missing relation_id must be vetoed")
+	}
+}
+
+func TestComboBuyLimitVeto(t *testing.T) {
+	// Prayer potion 3->4: buy 4x 3-dose (limit 2000), sell 3x 4-dose.
+	legs := []store.Leg{
+		{ItemID: 139, Side: "buy", Qty: 4, Price: 6_900},
+		{ItemID: 2434, Side: "sell", Qty: 3, Price: 9_700},
+	}
+	limits := map[int]int64{139: 2000, 2434: 2000}
+	st := comboStrat(1, 27_600, 28_518, legs)
+
+	st.Size.UnitsUsed = 2000 // the per-item limit read as conversions: 8000 buys
+	if reason := comboBuyLimitVeto(st, limits); !strings.Contains(reason, "at most 500") {
+		t.Errorf("2000 conversions x 4 must be vetoed with the 500 bound, got %q", reason)
+	}
+	st.Size.UnitsUsed = 500 // exactly the limit
+	if reason := comboBuyLimitVeto(st, limits); reason != "" {
+		t.Errorf("500 conversions x 4 = 2000 fits, got %q", reason)
+	}
+	st.Size.UnitsUsed = 2000 // sell legs and unknown limits never bind
+	if reason := comboBuyLimitVeto(st, map[int]int64{2434: 10}); reason != "" {
+		t.Errorf("unknown buy-leg limit must fail open, got %q", reason)
+	}
+
+	// several buy legs: the tightest bound is reported, every time (map order)
+	set := []store.Leg{
+		{ItemID: 139, Name: "Prayer potion(3)", Side: "buy", Qty: 4, Price: 6_900},
+		{ItemID: 777, Name: "Rare piece", Side: "buy", Qty: 1, Price: 1},
+		{ItemID: 2434, Side: "sell", Qty: 3, Price: 9_700},
+	}
+	st = comboStrat(1, 27_600, 28_518, set)
+	st.Size.UnitsUsed = 200
+	for i := 0; i < 50; i++ {
+		if reason := comboBuyLimitVeto(st, map[int]int64{139: 2000, 777: 8}); !strings.Contains(reason, "at most 8 here") || !strings.Contains(reason, "Rare piece") {
+			t.Fatalf("want the tightest bound (8, Rare piece), got %q", reason)
+		}
+	}
+	// a limit below the per-conversion qty can never fit
+	if reason := comboBuyLimitVeto(st, map[int]int64{139: 3}); !strings.Contains(reason, "untradeable") {
+		t.Errorf("limit 3 < 4 per conversion must say untradeable, got %q", reason)
+	}
+}
+
+func TestComboFloorVeto(t *testing.T) {
+	legs := []store.Leg{
+		{ItemID: 139, Side: "buy", Qty: 4, Price: 6_900},
+		{ItemID: 2434, Side: "sell", Qty: 3, Price: 9_700},
+	}
+	st := comboStrat(1, 27_600, 28_518, legs) // 918 gp per conversion
+	st.Size.UnitsUsed = 500                   // 459,000 per batch
+	if reason := comboFloorVeto(st); reason != "" {
+		t.Errorf("459k per batch clears the floor, got %q", reason)
+	}
+	st.Size.UnitsUsed = 200 // 183,600: resized to the limit, still claiming 459k
+	if reason := comboFloorVeto(st); !strings.Contains(reason, "under the C floor") {
+		t.Errorf("183,600 per batch must be vetoed, got %q", reason)
 	}
 }
 
