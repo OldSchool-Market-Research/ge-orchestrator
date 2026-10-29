@@ -117,7 +117,41 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, runs)
+	runIDs := make([]int64, 0, len(runs))
+	for _, run := range runs {
+		runIDs = append(runIDs, run.RunID)
+	}
+	shipped, err := s.Store.ShippedByRun(r.Context(), runIDs)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+
+	// fail_kind/fail_detail are present only on failed runs (detail may be
+	// ""), so pointers rather than plain omitempty strings.
+	type runView struct {
+		store.Run
+		Shipped    []store.ShippedStrategy `json:"shipped"`
+		FailKind   *string                 `json:"fail_kind,omitempty"`
+		FailDetail *string                 `json:"fail_detail,omitempty"`
+	}
+	out := make([]runView, 0, len(runs))
+	for _, run := range runs {
+		v := runView{Run: run, Shipped: shipped[run.RunID]}
+		if v.Shipped == nil {
+			v.Shipped = []store.ShippedStrategy{}
+		}
+		if run.Status == "failed" {
+			reason := ""
+			if run.FailReason != nil {
+				reason = *run.FailReason
+			}
+			kind, detail := classifyFail(reason)
+			v.FailKind, v.FailDetail = &kind, &detail
+		}
+		out = append(out, v)
+	}
+	writeJSON(w, 200, out)
 }
 
 func (s *Server) triggerRun(w http.ResponseWriter, r *http.Request) {
@@ -287,15 +321,48 @@ func (s *Server) listStrategies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Dashboard context for the whole list in three queries: eval trails +
+	// last eval, verdict counts, and every referenced item's icon.
+	ids := make([]int64, 0, len(list))
+	var itemIDs []int
+	for _, st := range list {
+		ids = append(ids, st.StrategyID)
+		itemIDs = append(itemIDs, st.ItemIDs()...)
+	}
+	sums, err := s.Store.EvalSummaries(r.Context(), ids, trailLen)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	icons, err := s.Store.ItemIcons(r.Context(), itemIDs)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+
 	type liveStrategy struct {
 		store.Strategy
-		LiveChecks  map[string]bool `json:"live_checks,omitempty"`
-		LiveVerdict string          `json:"live_verdict,omitempty"`
+		LiveChecks  map[string]bool   `json:"live_checks,omitempty"`
+		LiveVerdict string            `json:"live_verdict,omitempty"`
 		Live        *store.Evaluation `json:"live,omitempty"`
+
+		ItemIcons     map[int]string     `json:"item_icons"`
+		Trail         []store.TrailPoint `json:"trail"`
+		VerdictCounts map[string]int     `json:"verdict_counts"`
+		NEvals        int                `json:"n_evals"`
+		LastEval      *store.Evaluation  `json:"last_eval"`
 	}
 	out := make([]liveStrategy, 0, len(list))
 	for _, st := range list {
-		ls := liveStrategy{Strategy: st}
+		sum := sums[st.StrategyID]
+		ls := liveStrategy{
+			Strategy:      st,
+			ItemIcons:     iconsFor(st, icons),
+			Trail:         sum.Trail,
+			VerdictCounts: sum.VerdictCounts,
+			NEvals:        sum.NEvals,
+			LastEval:      sum.LastEval,
+		}
 		if q.Get("live") == "1" {
 			e, checks, err := s.Evaluator.Compute(r.Context(), st)
 			if err != nil {
@@ -328,7 +395,28 @@ func (s *Server) getStrategy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"strategy": st, "evaluations": evals})
+	icons, err := s.Store.ItemIcons(r.Context(), st.ItemIDs())
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"strategy": st, "evaluations": evals, "item_icons": iconsFor(*st, icons)})
+}
+
+// trailLen is how many of a strategy's newest evaluations GET
+// /api/strategies inlines as its sparkline trail.
+const trailLen = 30
+
+// iconsFor narrows an id→icon lookup to the items one strategy references.
+// Never nil: the field is always an object.
+func iconsFor(st store.Strategy, icons map[int]string) map[int]string {
+	out := map[int]string{}
+	for _, id := range st.ItemIDs() {
+		if icon, ok := icons[id]; ok {
+			out[id] = icon
+		}
+	}
+	return out
 }
 
 func (s *Server) scoreboard(w http.ResponseWriter, r *http.Request) {
