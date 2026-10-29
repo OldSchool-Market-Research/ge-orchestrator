@@ -84,21 +84,26 @@ func (s *Store) ProcessQuotes(ctx context.Context) ([]ProcessQuote, error) {
 	for rows.Next() {
 		q, err := scanProcessQuote(rows)
 		if err != nil {
-			return nil, err
+			return nil, processErr(err)
 		}
 		out = append(out, q)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, processErr(err)
+	}
+	return out, nil
 }
 
 // ProcessLeg is one process_legs_now row: the price a patient (slow) and an
 // instant (insta) trader would get on that leg, and the 24h volume on the
 // side a patient offer fills against.
 type ProcessLeg struct {
-	Side          string   `json:"side"`
-	ItemID        int      `json:"item_id"`
+	Side string `json:"side"`
+	// pointers: ge-data 06 treats a leg with a missing item_id or qty as an
+	// unpriceable recipe (NULL margins), not an error, so it must scan
+	ItemID        *int     `json:"item_id"`
 	Name          *string  `json:"name"`
-	Qty           float64  `json:"qty"`
+	Qty           *float64 `json:"qty"`
 	BuyLimit      *int64   `json:"buy_limit"`
 	PriceSlow     *int64   `json:"price_slow"`
 	PriceInsta    *int64   `json:"price_insta"`
@@ -154,11 +159,14 @@ func (s *Store) ProcessDetailByID(ctx context.Context, id int) (*ProcessDetail, 
 	for rows.Next() {
 		var l ProcessLeg
 		if err := rows.Scan(&l.Side, &l.ItemID, &l.Name, &l.Qty, &l.BuyLimit, &l.PriceSlow, &l.PriceInsta, &l.SlowAgeS, &l.FillVolume24h); err != nil {
-			return nil, err
+			return nil, processErr(err)
 		}
 		d.Legs = append(d.Legs, l)
 	}
-	return &d, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, processErr(err)
+	}
+	return &d, nil
 }
 
 // ProcessHistoryPoint is one time bucket of a recipe's snapshots. Averages
@@ -177,7 +185,15 @@ type ProcessHistoryPoint struct {
 
 // ProcessHistory buckets one recipe's snapshots since `since`. bucket is a
 // Postgres interval literal from the caller's closed set, bound as a param.
+// An unknown recipe_id returns (nil, nil), like ProcessDetailByID.
 func (s *Store) ProcessHistory(ctx context.Context, id int, since time.Time, bucket string) ([]ProcessHistoryPoint, error) {
+	var exists bool
+	if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM process_recipes WHERE recipe_id = $1)`, id).Scan(&exists); err != nil {
+		return nil, processErr(err)
+	}
+	if !exists {
+		return nil, nil
+	}
 	rows, err := s.Pool.Query(ctx, `
 		SELECT time_bucket($3::interval, ts),
 		       round(avg(margin_slow)), round(avg(margin_insta)), round(avg(gp_hr)), round(avg(gp_hr_insta)),
@@ -192,11 +208,14 @@ func (s *Store) ProcessHistory(ctx context.Context, id int, since time.Time, buc
 	for rows.Next() {
 		var p ProcessHistoryPoint
 		if err := rows.Scan(&p.Bucket, &p.MarginSlow, &p.MarginInsta, &p.GpHr, &p.GpHrInsta, &p.EffectiveActionsPerHour, &p.Hours, &p.PricedHours); err != nil {
-			return nil, err
+			return nil, processErr(err)
 		}
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, processErr(err)
+	}
+	return out, nil
 }
 
 // ProcessTopRow is one recipe's consistency over a window of hourly snapshots.
@@ -237,7 +256,7 @@ func (s *Store) ProcessTop(ctx context.Context, metric string, since time.Time, 
 		)
 		SELECT s.recipe_id, p.name, p.category, count(*), count(s.margin_slow), count(s.v),
 		       round(avg(s.v)),
-		       round(percentile_cont(0.5)  WITHIN GROUP (ORDER BY s.v)::numeric),
+		       round(percentile_cont(0.5)  WITHIN GROUP (ORDER BY s.v)::numeric) AS median,
 		       round(percentile_cont(0.25) WITHIN GROUP (ORDER BY s.v)::numeric),
 		       round(100.0 * count(*) FILTER (WHERE s.v > 0) / count(*), 1),
 		       count(*) FILTER (WHERE s.rk <= 10 AND s.v IS NOT NULL),
@@ -245,7 +264,7 @@ func (s *Store) ProcessTop(ctx context.Context, metric string, since time.Time, 
 		FROM s JOIN process_recipes p USING (recipe_id)
 		GROUP BY s.recipe_id, p.name, p.category
 		HAVING count(s.v) >= $3::numeric / 100 * count(*)
-		ORDER BY 8 DESC NULLS LAST, s.recipe_id
+		ORDER BY median DESC NULLS LAST, s.recipe_id
 		LIMIT $2`, since, limit, minCoveragePct)
 	if err != nil {
 		return nil, processErr(err)
@@ -256,9 +275,12 @@ func (s *Store) ProcessTop(ctx context.Context, metric string, since time.Time, 
 		var r ProcessTopRow
 		if err := rows.Scan(&r.RecipeID, &r.Name, &r.Category, &r.Hours, &r.PricedHours, &r.MetricHours, &r.Avg, &r.Median,
 			&r.P25, &r.PctHoursPositive, &r.HoursInTop10, &r.AvgLast24h); err != nil {
-			return nil, err
+			return nil, processErr(err)
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, processErr(err)
+	}
+	return out, nil
 }

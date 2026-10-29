@@ -22,6 +22,21 @@ func processFail(w http.ResponseWriter, err error) {
 	writeErr(w, 500, err.Error())
 }
 
+// processID parses the {id} path value as an int4 recipe_id. Out of range
+// is a 404 (no such recipe), not an encode error from the driver.
+func processID(w http.ResponseWriter, r *http.Request) (int, bool) {
+	n, err := strconv.ParseInt(r.PathValue("id"), 10, 32)
+	if errors.Is(err, strconv.ErrRange) {
+		writeErr(w, 404, "no processing recipe with that id")
+		return 0, false
+	}
+	if err != nil {
+		writeErr(w, 400, "id must be an integer recipe_id")
+		return 0, false
+	}
+	return int(n), true
+}
+
 // processDays parses ?days (default 7, 1..90) into a cutoff.
 func processDays(r *http.Request) (time.Time, bool) {
 	days := 7
@@ -45,9 +60,8 @@ func (s *Server) listProcess(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getProcess(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
-	if err != nil {
-		writeErr(w, 400, "id must be an integer recipe_id")
+	id, ok := processID(w, r)
+	if !ok {
 		return
 	}
 	d, err := s.Store.ProcessDetailByID(r.Context(), id)
@@ -62,12 +76,17 @@ func (s *Server) getProcess(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, d)
 }
 
-var processBuckets = map[string]string{"1h": "1 hour", "6h": "6 hours", "1d": "1 day"}
+var processBuckets = map[string]struct {
+	interval string
+	hours    int
+}{"1h": {"1 hour", 1}, "6h": {"6 hours", 6}, "1d": {"1 day", 24}}
+
+// maxHistoryBuckets keeps one response to a few hundred points, like ge-mcp.
+const maxHistoryBuckets = 400
 
 func (s *Server) processHistory(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
-	if err != nil {
-		writeErr(w, 400, "id must be an integer recipe_id")
+	id, ok := processID(w, r)
+	if !ok {
 		return
 	}
 	since, ok := processDays(r)
@@ -84,9 +103,17 @@ func (s *Server) processHistory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bucket must be 1h, 6h or 1d")
 		return
 	}
-	points, err := s.Store.ProcessHistory(r.Context(), id, since, bucket)
+	if time.Since(since).Hours()/float64(bucket.hours) > maxHistoryBuckets {
+		writeErr(w, 400, "days/bucket exceeds 400 points: use bucket=6h beyond 16 days")
+		return
+	}
+	points, err := s.Store.ProcessHistory(r.Context(), id, since, bucket.interval)
 	if err != nil {
 		processFail(w, err)
+		return
+	}
+	if points == nil {
+		writeErr(w, 404, "no processing recipe with that id")
 		return
 	}
 	writeJSON(w, 200, points)
