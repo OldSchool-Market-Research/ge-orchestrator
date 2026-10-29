@@ -25,10 +25,16 @@ func TestProcessReads(t *testing.T) {
 	}
 	defer s.Pool.Close()
 
-	quotes, err := s.ProcessQuotes(ctx)
-	if errors.Is(err, ErrProcessUnavailable) {
+	// skip only when the views genuinely aren't there: a misspelled column in
+	// our own SQL also maps to ErrProcessUnavailable (42703) and must fail
+	var present bool
+	if err := s.Pool.QueryRow(ctx, `SELECT to_regclass('public.process_quotes_now') IS NOT NULL`).Scan(&present); err != nil {
+		t.Fatal(err)
+	}
+	if !present {
 		t.Skip("processing schema not applied")
 	}
+	quotes, err := s.ProcessQuotes(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
