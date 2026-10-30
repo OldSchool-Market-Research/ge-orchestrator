@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 )
@@ -196,6 +197,7 @@ func (s *Store) CalibrationLatest(ctx context.Context) ([]CalibrationRow, error)
 	for _, r := range best {
 		out = append(out, r)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Archetype < out[j].Archetype })
 	return out, nil
 }
 

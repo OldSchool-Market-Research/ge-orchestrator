@@ -219,3 +219,87 @@ func TestUpsertSignalGuards(t *testing.T) {
 		t.Fatalf("metrics %s: %v", raw, err)
 	}
 }
+
+// A dismissal with no score (a re-armed signal) must not block the escape: the
+// bar is the latest dismissal that has one. Needs STORE_TEST_DSN.
+func TestUpsertSignalEscapeSkipsNullScores(t *testing.T) {
+	dsn := os.Getenv("STORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("STORE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	const item, cooldown = 987655, 48 * time.Hour
+	cleanup := func() { s.Pool.Exec(ctx, `DELETE FROM orchestrator.signals WHERE item_id=$1`, item) }
+	cleanup()
+	defer cleanup()
+	seed := func(metrics string, ago string) {
+		t.Helper()
+		if _, err := s.Pool.Exec(ctx, `INSERT INTO orchestrator.signals
+			(kind, item_id, item_name, metrics, status, reason, resolved_at)
+			VALUES ('combo', $1, 'x', $2::jsonb, 'dismissed', 'dead', now() - $3::interval)`, item, metrics, ago); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed(`{"budget_cycle_gp":300000}`, "4 days")
+	seed(`{"relation_id":7,"source":"confirm_rearm"}`, "3 days") // the latest has no score
+	isNew, err := s.UpsertSignal(ctx, "combo", item, "x", map[string]any{"budget_cycle_gp": 500000}, cooldown)
+	if err != nil || isNew {
+		t.Fatalf("under 2x the last scored dismissal stays out: new=%v err=%v", isNew, err)
+	}
+	isNew, err = s.UpsertSignal(ctx, "combo", item, "x", map[string]any{"budget_cycle_gp": 600000}, cooldown)
+	if err != nil || !isNew {
+		t.Fatalf("2x the last scored dismissal re-opens it: new=%v err=%v", isNew, err)
+	}
+}
+
+// A run orphaned by a restart gives its assigned signals back, or their items
+// could never queue again. Needs STORE_TEST_DSN.
+func TestOrphanRunningRunsReleasesSignals(t *testing.T) {
+	dsn := os.Getenv("STORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("STORE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	const item = 987656
+	cleanup := func() { s.Pool.Exec(ctx, `DELETE FROM orchestrator.signals WHERE item_id=$1`, item) }
+	cleanup()
+	defer cleanup()
+	if _, err := s.OrphanRunningRuns(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertSignal(ctx, "vflip", item, "x", map[string]any{"gp_cycle": 900000}, 0); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := s.CreateRun(ctx, json.RawMessage(`{}`), "test brief", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id int64
+	if err := s.Pool.QueryRow(ctx, `SELECT signal_id FROM orchestrator.signals WHERE item_id=$1`, item).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AssignSignals(ctx, runID, []int64{id}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.OrphanRunningRuns(ctx); err != nil || n != 1 {
+		t.Fatalf("orphaned %d: %v", n, err)
+	}
+	var status string
+	var run *int64
+	if err := s.Pool.QueryRow(ctx, `SELECT status, run_id FROM orchestrator.signals WHERE signal_id=$1`, id).Scan(&status, &run); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || run != nil {
+		t.Fatalf("status %s run %v", status, run)
+	}
+}

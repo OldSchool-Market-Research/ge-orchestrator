@@ -219,11 +219,14 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 
 // Ship floors, duplicated from runner/vet.go (runner imports brief, so the
 // constants can't live there and be shared). The calibration section uses
-// them to translate a factor into the raw claim it implies.
+// them to translate a factor into the raw claim it implies. C has no line here:
+// its calibrated floor is not enforced, and a raw-claim bar would throttle it by
+// instruction instead. C:combine reads pace 0 on a positive margin (a thin leg's
+// 30-minute volume can round its participation-capped conversions to 0), so its
+// 0.15 factor would imply a 1.33M bar on a kind that earned 35M in a fortnight.
 const (
 	briefFloorFPerCycleGp = 400_000
 	briefFloorBPerCycleGp = 100_000
-	briefFloorCPerCycleGp = 200_000
 )
 
 // trackMinSurvive is the share of recent closes that must outlive the
@@ -300,8 +303,6 @@ func writeCalibration(b *strings.Builder, cal []store.CalibrationRow, modes []st
 			floor = briefFloorFPerCycleGp
 		case "B":
 			floor = briefFloorBPerCycleGp
-		case "C":
-			floor = briefFloorCPerCycleGp
 		}
 		if floor > 0 && r.Factor > 0 && r.Factor < 1 {
 			fmt.Fprintf(b, " At this factor the %s gp/cycle floor implies a raw claim of ~%s gp/cycle to hold up.",

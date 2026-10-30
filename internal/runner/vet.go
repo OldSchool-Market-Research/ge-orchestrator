@@ -196,10 +196,13 @@ func (r *Runner) loadRecord(ctx context.Context) *record {
 	return rec
 }
 
-// CalRowFor is the strategy's own calibration row: its recipe kind's when one
-// exists, else its lane's.
+// CalRowFor is the strategy's own calibration row: its recipe kind's once that
+// row measures something, else its lane's. Every C close writes all the kind
+// rows, so a thin kind always has one, and below its sample gate it holds only
+// the default factor, which must not stand in for a measured blended row.
 func (rec *record) CalRowFor(st store.SidecarStrategy) *store.CalibrationRow {
-	if row := rec.CalRow(store.CalKey(st.Archetype, st.RelationKind)); row != nil {
+	row := rec.CalRow(store.CalKey(st.Archetype, st.RelationKind))
+	if row != nil && (row.PSurvive != nil || row.PaceRatio != nil) {
 		return row
 	}
 	return rec.CalRow(st.Archetype)
@@ -208,12 +211,10 @@ func (rec *record) CalRowFor(st store.SidecarStrategy) *store.CalibrationRow {
 // FactorFor is CalRowFor's factor, with Factor's fail-open: no usable
 // measurement reads as 1.
 func (rec *record) FactorFor(st store.SidecarStrategy) float64 {
-	if rec != nil && rec.factors != nil {
-		if f, ok := rec.factors[store.CalKey(st.Archetype, st.RelationKind)]; ok && f > 0 {
-			return f
-		}
+	if row := rec.CalRowFor(st); row != nil && row.Factor > 0 {
+		return row.Factor
 	}
-	return rec.Factor(st.Archetype)
+	return 1
 }
 
 // vetOne returns the veto reason ("" = accepted) and the harness projection.
@@ -323,8 +324,12 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 	var proj *int64
 	if st.Archetype == "F" && snap != nil {
 		proj = eval.ProjectFlipPer1h(st.EntryPrice, st.ExitPrice, st.Size.UnitsUsed, snap.Vol30m)
-		if reason := flipProjectionVeto(proj); reason != "" {
-			return reason, nil
+		// No 30m volume can mean a stalled poll (the snapshot coalesces it to
+		// 0), so it fails open here as it does in evSanity.
+		if snap.Vol30m > 0 {
+			if reason := flipProjectionVeto(proj); reason != "" {
+				return reason, nil
+			}
 		}
 	}
 

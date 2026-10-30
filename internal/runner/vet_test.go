@@ -130,23 +130,32 @@ func TestEvSanityHasNoSlack(t *testing.T) {
 }
 
 func TestRecordKindFactorFallsBackToLane(t *testing.T) {
-	rec := &record{
-		factors: map[string]float64{"C": 0.3, "C:set": 0.6},
-		cal:     map[string]store.CalibrationRow{"C": {Archetype: "C"}, "C:set": {Archetype: "C:set"}},
-	}
+	measured := 0.7
+	rec := &record{cal: map[string]store.CalibrationRow{
+		"C":         {Archetype: "C", Factor: 0.3, PSurvive: &measured},
+		"C:set":     {Archetype: "C:set", Factor: 0.6, PSurvive: &measured},
+		"C:combine": {Archetype: "C:combine", Factor: 0.15}, // below its sample gate
+	}}
 	set := store.SidecarStrategy{Archetype: "C", RelationKind: "set"}
 	decant := store.SidecarStrategy{Archetype: "C", RelationKind: "decant"}
+	combine := store.SidecarStrategy{Archetype: "C", RelationKind: "combine"}
 	if f := rec.FactorFor(set); f != 0.6 {
 		t.Errorf("set factor %v", f)
 	}
 	if f := rec.FactorFor(decant); f != 0.3 {
 		t.Errorf("a kind with no row falls back to its lane: %v", f)
 	}
+	if f := rec.FactorFor(combine); f != 0.3 {
+		t.Errorf("a kind below its sample gate falls back to its lane: %v", f)
+	}
 	if row := rec.CalRowFor(set); row == nil || row.Archetype != "C:set" {
 		t.Errorf("set row %+v", row)
 	}
 	if row := rec.CalRowFor(decant); row == nil || row.Archetype != "C" {
 		t.Errorf("decant row %+v", row)
+	}
+	if row := rec.CalRowFor(combine); row == nil || row.Archetype != "C" {
+		t.Errorf("combine row %+v", row)
 	}
 	var none *record
 	if f := none.FactorFor(set); f != 1 {

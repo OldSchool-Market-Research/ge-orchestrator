@@ -64,7 +64,7 @@ var upsertSignalSQL = fmt.Sprintf(`INSERT INTO orchestrator.signals (kind, item_
 			   AND resolved_at > now() - make_interval(days => $6::int)) >= $7
 			AND coalesce(%[2]s >= $8::float8 * (
 				SELECT %[3]s FROM orchestrator.signals
-				WHERE kind=$1 AND item_id=$2 AND %[1]s
+				WHERE kind=$1 AND item_id=$2 AND %[1]s AND %[3]s IS NOT NULL
 				ORDER BY resolved_at DESC LIMIT 1), false) = false))
 	ON CONFLICT (kind, item_id) WHERE status IN ('pending','assigned')
 	DO UPDATE SET metrics = EXCLUDED.metrics
@@ -79,10 +79,10 @@ var upsertSignalSQL = fmt.Sprintf(`INSERT INTO orchestrator.signals (kind, item_
 // a (kind, item) dismissed within the cooldown is not re-queued — the
 // falsification that killed it is assumed to still hold — and neither is one
 // the repeat guard above holds out. Zero disables both (watch revalidation
-// passes 0: re-proving is that lens's whole job). The guards suppress the
-// metrics refresh of an already-live signal in the rare deploy-transition case
-// where a live row coexists with a recent dismissal; that refresh is cosmetic,
-// so the simpler SQL wins.
+// passes 0: re-proving is that lens's whole job). The guards also suppress the
+// metrics refresh of an already-live signal whose (kind, item) they hold out,
+// such as an escaped signal whose score has since fallen back; that refresh is
+// cosmetic, so the simpler SQL wins.
 func (s *Store) UpsertSignal(ctx context.Context, kind string, itemID int, itemName string, metrics any, dismissCooldown time.Duration) (bool, error) {
 	m, err := json.Marshal(metrics)
 	if err != nil {

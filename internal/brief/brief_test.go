@@ -33,9 +33,11 @@ func TestWriteCalibration(t *testing.T) {
 			t.Errorf("calibration section missing %q in:\n%s", want, out)
 		}
 	}
-	// 200,000 / 0.125 = 1,600,000 raw gp/cycle: C has a floor too.
-	if !strings.Contains(out, "~1,600,000 gp/cycle") {
-		t.Errorf("C line must translate its floor:\n%s", out)
+	// C's calibrated floor is not enforced: no implied-raw-claim sentence on its lines.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "- C") && strings.Contains(line, "floor implies") {
+			t.Errorf("C line must not carry a floor translation: %q", line)
+		}
 	}
 	// C leads F, whatever order the rows arrive in.
 	if strings.Index(out, "- C: factor") > strings.Index(out, "- F: factor") {
