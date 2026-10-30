@@ -151,15 +151,22 @@ func (s *Store) FinishRun(ctx context.Context, runID int64, status, reportPath, 
 	return err
 }
 
-// OrphanRunningRuns marks leftover 'running' rows failed (startup recovery).
+// OrphanRunningRuns marks leftover 'running' rows failed and returns their
+// assigned signals to the queue (startup recovery). An assigned signal on a dead
+// run would hold its live-index slot forever, so its item could never re-queue.
 func (s *Store) OrphanRunningRuns(ctx context.Context) (int64, error) {
-	tag, err := s.Pool.Exec(ctx, `UPDATE orchestrator.runs
-		SET status='failed', finished_at=now(), fail_reason='orphaned by orchestrator restart'
-		WHERE status='running'`)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
+	var n int64
+	err := s.Pool.QueryRow(ctx, `WITH orphaned AS (
+			UPDATE orchestrator.runs
+			SET status='failed', finished_at=now(), fail_reason='orphaned by orchestrator restart'
+			WHERE status='running'
+			RETURNING run_id
+		), released AS (
+			UPDATE orchestrator.signals SET status='pending', run_id=NULL
+			WHERE status='assigned' AND run_id IN (SELECT run_id FROM orphaned)
+		)
+		SELECT count(*) FROM orphaned`).Scan(&n)
+	return n, err
 }
 
 func (s *Store) Runs(ctx context.Context, limit int) ([]Run, error) {

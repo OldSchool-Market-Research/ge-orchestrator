@@ -17,6 +17,10 @@ const (
 	flipCycleHours   = 4    // F: one buy-limit cycle
 	floorFCapacityGp = 400_000
 	floorBCapacityGp = 100_000
+	floorCBatchGp    = 200_000
+	// comboKillFloorFraction is the share of the C ship floor a conversion
+	// must still earn per batch at its shipped size to stay alive.
+	comboKillFloorFraction = 0.5
 )
 
 // ProjectFlipPer1h is the harness's own projection of a lane-F strategy at

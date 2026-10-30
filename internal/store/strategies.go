@@ -111,6 +111,10 @@ type SidecarStrategy struct {
 	RelationID      *int        `json:"relation_id,omitempty"`
 	Event           *Event      `json:"event,omitempty"`
 	EvalWindowHours *int        `json:"eval_window_hours,omitempty"`
+
+	// RelationKind is set by the vetter, never by the sidecar JSON: the
+	// cited recipe's kind, which picks a conversion's calibration row.
+	RelationKind string `json:"-"`
 }
 
 type Sidecar struct {

@@ -521,7 +521,7 @@ func (s *Server) briefPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Preview with the signals a real trigger would assign right now.
-	pending, err := s.Store.PendingSignals(r.Context(), 10)
+	pending, err := s.Store.NextSignals(r.Context(), p.Archetypes, 10)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

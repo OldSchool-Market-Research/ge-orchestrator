@@ -122,8 +122,11 @@ data-backed one-line change instead of folklore.
 
 Two denominator changes in the evaluator, no new machinery:
 
-1. **Health ticks** compare the live margin against the *calibrated* projected
-   margin (`marginOKFraction × factor × projection`) instead of the uncalibrated one.
+1. **Health ticks** for C once compared the live margin against the *calibrated*
+   projected margin. That bar was circular (a low factor loosened the kill test,
+   which raised the survival feeding the factor), so since 2026-10-30 a conversion
+   must instead earn half the C floor per batch at its shipped size. F and B
+   already kill on their absolute floors.
 2. **Confirm ratio** (0.5) is measured against calibrated projection.
 
 Migration 009 already made the denominator the harness's own haircut
@@ -210,7 +213,8 @@ baseline; each phase gets its own before/after on the /api/calibration chart.
 1. Survival threshold for `P(survive)`: 6h is proposed (past the 3-tick kill
    zone, short of expiry). Gut-check against how long a thesis "should" live.
 2. Should the calibrated floor veto (phase 2) start in log-only mode for a few
-   days ("would have vetoed N") before enforcing? — *Resolved: yes. It ships
-   as `GE_ORCH_CAL_VETO_MODE=log` (default); flipping to `enforce` is a
-   config change once the "would veto" lines size the rule.*
+   days ("would have vetoed N") before enforcing? — *Resolved: yes, per lane.
+   `GE_ORCH_CAL_VETO_ENFORCE` lists the enforced lanes (default `F` since
+   2026-10-30); the rest only log "would veto" lines. C stays log-only: the rule
+   would have blocked 99 of its 185 ships over Oct 16-30, which earned 69M.*
 3. Graveyard cooldown 14d — too long for a market this fast?

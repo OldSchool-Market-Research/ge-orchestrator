@@ -133,12 +133,22 @@ func (ev *Evaluator) computeCombo(ctx context.Context, st store.Strategy) (store
 	checks["legs_fresh"] = allFresh
 	checks["vol_ok"] = volOK
 
-	// The margin yardstick is the CALIBRATED projection (§3C): the pitched
-	// margin was an optimistic snapshot, and killing against it re-litigates
-	// the pitch instead of the position. factor 1 (no record) = old rule.
-	factor := ev.calFactor(ctx, st.Archetype)
+	// The kill bar is absolute, like F's and B's: the live margin at the
+	// shipped size must still earn half the lane floor per batch. Measuring
+	// against the pitch re-litigates the pitch instead of the position, and
+	// the calibrated pitch it replaced was circular: a low factor loosened the
+	// kill test, which raised the survival that feeds the factor. Backtest on
+	// the 176 C closes of Oct 16-30, alive at 6h: 130 here, 136 under the old
+	// bar, 71 at half the raw pitch; sets gain (70 vs 67), decants lose (30
+	// vs 36). A strategy with no recorded size can only fail on a non-positive
+	// margin.
 	projected := st.ExitPrice - st.EntryPrice // per conversion, post-tax by contract
-	marginOK := allPriced && float64(marginNowRaw) >= marginOKFraction*factor*float64(projected)
+	killBar := comboKillBar(units)
+	batchNow := marginNowRaw
+	if units > 0 {
+		batchNow = marginNowRaw * units
+	}
+	marginOK := allPriced && float64(batchNow) >= killBar
 	checks["margin_ok"] = marginOK
 
 	var realizedPer1h, rawPer1h *int64
@@ -166,8 +176,17 @@ func (ev *Evaluator) computeCombo(ctx context.Context, st store.Strategy) (store
 	finishEvaluation(&e, checks, verdict, map[string]any{
 		"legs": legDetails,
 		"combo_margin_now": marginNowRaw, "combo_margin_haircut": marginNowHaircut,
-		"projected_margin": projected, "cal_factor": factor,
+		"projected_margin": projected, "kill_bar_gp": killBar,
 		"realized_raw_per_1h": rawPer1h, "realized_haircut_per_1h": realizedPer1h,
 	})
 	return e, checks, nil
+}
+
+// comboKillBar is the batch gp below which a conversion is failing: half the
+// lane floor, or a positive margin when the strategy records no size.
+func comboKillBar(units int64) float64 {
+	if units <= 0 {
+		return 1
+	}
+	return comboKillFloorFraction * floorCBatchGp
 }
