@@ -22,6 +22,8 @@ func TestWriteCalibration(t *testing.T) {
 	})
 	out := b.String()
 	for _, want := range []string{
+		"so pre-filter F with it",
+		"never dismiss a conversion on its factor alone",
 		"factor 0.21 = p_survive 0.42 (14 of 33 closed alive) x pace default (below sample gate, n=4)",
 		// 400,000 / 0.21 ≈ 1,904,761 raw gp/cycle
 		"~1,904,761 gp/cycle",

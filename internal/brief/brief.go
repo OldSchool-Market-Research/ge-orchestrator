@@ -288,8 +288,8 @@ func calOrder(cal []store.CalibrationRow) []store.CalibrationRow {
 // §3A) and the failure-mode digest (§3B). Pure over its inputs so it is
 // testable; Render only calls it when at least one factor exists.
 func writeCalibration(b *strings.Builder, cal []store.CalibrationRow, modes []store.FailureModeCount) {
-	b.WriteString("\n### Calibration (harness-measured from the paper record — pre-filter your arithmetic with it)\n")
-	fmt.Fprintf(b, "- EV_calibrated = factor x your claimed EV, where factor = p_survive (share of closed ships alive past %.0fh, trailing %dd) x pace_ratio (median realized/projected of those survivors). Judge your own candidates by their calibrated EV — the harness does.\n",
+	b.WriteString("\n### Calibration (harness-measured from the paper record)\n")
+	fmt.Fprintf(b, "- EV_calibrated = factor x your claimed EV, where factor = p_survive (share of closed ships alive past %.0fh, trailing %dd) x pace_ratio (median realized/projected of those survivors). Lane F is vetoed when its calibrated EV is under the floor, so pre-filter F with it. Lane C is not: use its rows to choose where to spend turns, and never dismiss a conversion on its factor alone.\n",
 		store.CalSurviveHours, store.CalWindowDays)
 	for _, r := range calOrder(cal) {
 		fmt.Fprintf(b, "- %s: factor %.2f = p_survive %s x pace %s.",
