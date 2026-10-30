@@ -128,9 +128,15 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 
 	writeOpenBook(ctx, &b, s, p)
 	writeWatchlist(ctx, &b, s)
-	if list, err := s.Proposals(ctx, "", maxBriefProposals); err == nil {
-		writeProposals(&b, list)
+	// per status, so a backlog of open ideas can't push out the rejections the
+	// directive tells the agent not to re-file
+	var proposals []store.Proposal
+	for _, status := range []string{"open", "rejected", "accepted"} {
+		if list, err := s.Proposals(ctx, status, maxBriefProposals); err == nil {
+			proposals = append(proposals, list...)
+		}
 	}
+	writeProposals(&b, proposals)
 
 	if len(assigned) > 0 {
 		b.WriteString("\n### Assigned candidates (from the collector's work queue — investigate these FIRST)\n")
@@ -438,8 +444,18 @@ func writeWatchlist(ctx context.Context, b *strings.Builder, s *store.Store) {
 	}
 }
 
-// maxBriefProposals bounds what the brief spends on the list of ideas on file.
-const maxBriefProposals = 10
+// maxBriefProposals bounds what the brief spends on ideas on file, per status.
+const maxBriefProposals = 5
+
+// briefLine keeps model or operator text on its own bullet: this list is in the
+// system prompt, where a newline in a title could forge a section.
+func briefLine(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
+}
 
 // writeProposals renders what's already on file, so a run doesn't re-file it and can
 // learn from the operator's calls. Empty input writes nothing.
@@ -449,12 +465,14 @@ func writeProposals(b *strings.Builder, list []store.Proposal) {
 	}
 	b.WriteString("\n### Your proposals on file (don't re-file these; a rejected one needs new evidence)\n")
 	for _, p := range list {
-		line := fmt.Sprintf("- [%s, %s] %s", p.Kind, p.Status, p.Title)
+		line := fmt.Sprintf("- [%s, %s] %s", p.Kind, p.Status, briefLine(p.Title, 120))
 		if p.TimesProposed > 1 {
 			line += fmt.Sprintf(" (filed %d times)", p.TimesProposed)
 		}
-		if p.DecisionNote != nil && strings.TrimSpace(*p.DecisionNote) != "" {
-			line += " — operator: " + strings.TrimSpace(*p.DecisionNote)
+		if p.DecisionNote != nil {
+			if note := briefLine(*p.DecisionNote, 300); note != "" {
+				line += " — operator: " + note
+			}
 		}
 		b.WriteString(line + "\n")
 	}

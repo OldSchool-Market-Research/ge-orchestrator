@@ -67,7 +67,7 @@ func TestProposalLifecycle(t *testing.T) {
 	for _, p := range list {
 		byKind[p.Kind] = p
 	}
-	if byKind["lane"].TimesProposed != 2 || byKind["lane"].RunID != 1 {
+	if byKind["lane"].TimesProposed != 2 || byKind["lane"].RunID != 2 {
 		t.Errorf("lane %+v", byKind["lane"])
 	}
 	if byKind["recipe"].RecipeCheck == nil || *byKind["recipe"].RecipeCheck != "margin now 5 gp" || !strings.Contains(string(byKind["recipe"].Recipe), "102") {
@@ -81,6 +81,7 @@ func TestProposalLifecycle(t *testing.T) {
 	if err := s.DecideProposal(ctx, id, "rejected", "not now"); err != nil {
 		t.Fatal(err)
 	}
+	lane.Evidence = "new evidence"
 	if _, err := s.InsertProposal(ctx, 3, lane, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -88,19 +89,27 @@ func TestProposalLifecycle(t *testing.T) {
 	if err != nil || len(rejected) != 1 || rejected[0].TimesProposed != 3 || rejected[0].DecisionNote == nil || *rejected[0].DecisionNote != "not now" {
 		t.Fatalf("a repeat counts but doesn't reopen: %+v %v", rejected, err)
 	}
+	if rejected[0].Evidence != "new evidence" || rejected[0].RunID != 3 {
+		t.Errorf("a repeat must show its own evidence and run: %+v", rejected[0])
+	}
 	if err := s.DecideProposal(ctx, 99999999, "accepted", ""); !errors.Is(err, ErrProposalNotFound) {
 		t.Errorf("unknown id: %v", err)
 	}
 
-	// A recipe already in the table, in either direction, is recognized.
-	var name string
-	var in, out json.RawMessage
-	if err := s.Pool.QueryRow(ctx, `SELECT name, inputs, outputs FROM item_relations LIMIT 1`).Scan(&name, &in, &out); err != nil {
-		t.Skipf("no recipes seeded: %v", err)
+	// A recipe already in the table is recognized in each direction it can run.
+	seeded := func(reversible bool) (string, ProposedRecipe) {
+		var name string
+		var in, out json.RawMessage
+		if err := s.Pool.QueryRow(ctx, `SELECT name, inputs, outputs FROM item_relations WHERE reversible = $1 LIMIT 1`,
+			reversible).Scan(&name, &in, &out); err != nil {
+			t.Skipf("no recipes seeded: %v", err)
+		}
+		var r ProposedRecipe
+		json.Unmarshal(in, &r.Inputs)
+		json.Unmarshal(out, &r.Outputs)
+		return name, r
 	}
-	var r ProposedRecipe
-	json.Unmarshal(in, &r.Inputs)
-	json.Unmarshal(out, &r.Outputs)
+	name, r := seeded(true)
 	if got, err := s.RecipeOnFile(ctx, r); err != nil || got != name {
 		t.Errorf("forward: %q %v, want %q", got, err, name)
 	}
@@ -109,5 +118,12 @@ func TestProposalLifecycle(t *testing.T) {
 	}
 	if got, err := s.RecipeOnFile(ctx, ProposedRecipe{Inputs: []RelationLeg{{424242, 1}}, Outputs: r.Outputs}); err != nil || got != "" {
 		t.Errorf("not on file: %q %v", got, err)
+	}
+	oneWay, r := seeded(false)
+	if got, err := s.RecipeOnFile(ctx, r); err != nil || got != oneWay {
+		t.Errorf("one-way forward: %q %v, want %q", got, err, oneWay)
+	}
+	if got, err := s.RecipeOnFile(ctx, ProposedRecipe{Inputs: r.Outputs, Outputs: r.Inputs}); err != nil || got != "" {
+		t.Errorf("the reverse of a one-way recipe is new: %q %v", got, err)
 	}
 }

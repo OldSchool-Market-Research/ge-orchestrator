@@ -70,8 +70,10 @@ func proposalFingerprint(p SidecarProposal) string {
 }
 
 // InsertProposal files one proposal, or counts a repeat of one already on file. A
-// repeat never reopens a decision. check is the harness's read of a proposed recipe,
-// "" for other kinds. Returns true when the idea is new.
+// repeat never reopens a decision, but it does replace the text: the directive
+// invites a rejected idea back with new evidence, and the operator must read that,
+// not the old filing. check is the harness's read of a proposed recipe, "" for other
+// kinds. Returns true when the idea is new.
 func (s *Store) InsertProposal(ctx context.Context, runID int64, p SidecarProposal, check string) (bool, error) {
 	var recipe any
 	if p.Recipe != nil {
@@ -86,14 +88,17 @@ func (s *Store) InsertProposal(ctx context.Context, runID int64, p SidecarPropos
 			(run_id, kind, title, detail, evidence, recipe, recipe_check, fingerprint)
 		VALUES ($1,$2,$3,$4,$5,$6::jsonb,nullif($7,''),$8)
 		ON CONFLICT (fingerprint) DO UPDATE
-			SET times_proposed = orchestrator.proposals.times_proposed + 1, last_seen_at = now()
+			SET times_proposed = orchestrator.proposals.times_proposed + 1, last_seen_at = now(),
+			    run_id = EXCLUDED.run_id, title = EXCLUDED.title, detail = EXCLUDED.detail,
+			    evidence = EXCLUDED.evidence, recipe = EXCLUDED.recipe, recipe_check = EXCLUDED.recipe_check
 		RETURNING (xmax = 0)`,
 		runID, p.Kind, p.Title, p.Detail, p.Evidence, recipe, check, proposalFingerprint(p)).Scan(&isNew)
 	return isNew, err
 }
 
 // RecipeOnFile reports whether item_relations already holds these exact legs, in
-// either direction: the agent can't see the whole table at once, so it may re-propose.
+// either direction it can run: the agent can't see the whole table at once, so it may
+// re-propose. The reverse of a one-way recipe is a different, new recipe.
 func (s *Store) RecipeOnFile(ctx context.Context, r ProposedRecipe) (string, error) {
 	inputs, err := json.Marshal(r.Inputs)
 	if err != nil {
@@ -106,7 +111,7 @@ func (s *Store) RecipeOnFile(ctx context.Context, r ProposedRecipe) (string, err
 	var name string
 	err = s.Pool.QueryRow(ctx, `SELECT name FROM item_relations
 		WHERE (inputs @> $1::jsonb AND inputs <@ $1::jsonb AND outputs @> $2::jsonb AND outputs <@ $2::jsonb)
-		   OR (inputs @> $2::jsonb AND inputs <@ $2::jsonb AND outputs @> $1::jsonb AND outputs <@ $1::jsonb)
+		   OR (reversible AND inputs @> $2::jsonb AND inputs <@ $2::jsonb AND outputs @> $1::jsonb AND outputs <@ $1::jsonb)
 		LIMIT 1`, inputs, outputs).Scan(&name)
 	if err == pgx.ErrNoRows {
 		return "", nil
