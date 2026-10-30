@@ -239,6 +239,12 @@ where they came from. P1 starts recording that, in log mode.
   than simulated fills, so the weights are a record to judge first.
 - **Regime** (`store.RecordRegime`, `regime_snapshots`, `GET /api/regime`): one row
   per sweep, logged now because conditioning on it later needs weeks of history.
+- **Lane P packet** (`runner.logProcessPacket`, `lane_packets`, `GET /api/packets`):
+  at each run's start, every recipe's verdict from the vet's own rules, at the size a
+  strategy would copy. The API sets the shippable ones against what the model pitched
+  and the vet passed. Log mode: no run reads it. It's the first step of splitting runs
+  into a frequent evaluate mode (a script gathers and filters, the model judges) and a
+  rare research mode. Runs only switch once this comparison holds up.
 
 ## C's measurement epoch 2 (2026-10-30)
 
