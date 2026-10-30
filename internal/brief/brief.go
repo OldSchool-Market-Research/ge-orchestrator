@@ -45,8 +45,10 @@ func Defaults() Params {
 		// the operator picks. C is primary, the repeat-on-your-own-time lane
 		// (decants/sets/combines vs the item_relations table — the agent
 		// notes-and-moves-on if the table is absent): +299M est. over Oct 16-30
-		// against F's +3.9M. F drops to opportunistic with V/U: 0 of its 81
-		// closes that fortnight survived 6h. S/H
+		// against F's +3.9M. V/U are opportunistic. F is OFF (weight 0, the
+		// operator's call, 2026-10-30): 0 of its 81 closes that fortnight survived
+		// 6h. The collector keeps its vflip snapshots and the regime row keeps
+		// its persistence, so the evidence for turning it back on stays. S/H
 		// retired (0% confirmed at this data age). B is OFF (weight 0,
 		// vet-enforced) on its first-fortnight record: 3/33 winners, -67.5M
 		// realized, and still -21.6M in the most generous counterfactual
@@ -56,15 +58,10 @@ func Defaults() Params {
 		// (roundtrips-gated, spread-capture eval), not as the mid-marked
 		// multi-day hold this lane actually was.
 		CapitalGp: 50_000_000, Risk: "low", MinConfidence: "medium",
-		Archetypes: map[string]float64{"F": 0.5, "B": 0, "V": 0.5, "C": 1.5, "U": 0.5},
-		// The operator's own two screens, in their words: they ARE the vflip
-		// and hvflip sweep lenses. The bar for shipping a flip: margin real
-		// (fresh), persistent (reappears across the day), fillable (volume
-		// supports the size), and worth it in absolute gp (clears the floor).
-		Notes: "Volume flips: daily volume > 100k units, both sides printing within 30-60 min, weight by " +
-			"absolute margin x buy limit — evaluate how these items move through the day/week before shipping. " +
-			"Single-item flips: cost > 10M, bought and sold within 30 min, daily volume > 200 — quick but " +
-			"risky; require solid day-over-day and week-over-week trends before trusting the margin.",
+		Archetypes: map[string]float64{"F": 0, "B": 0, "V": 0.5, "C": 1.5, "U": 0.5},
+		// No default notes: the operator's old ones described the two flip screens
+		// (vflip, hvflip), both now off, and the directive makes notes priority
+		// candidates. Git history has them for when a flip lane returns.
 	}
 }
 
