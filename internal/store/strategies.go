@@ -115,6 +115,11 @@ type SidecarStrategy struct {
 	// RelationKind is set by the vetter, never by the sidecar JSON: the
 	// cited recipe's kind, which picks a conversion's calibration row.
 	RelationKind string `json:"-"`
+
+	// Provenance, set by the runner at ingest (store.AttachProvenance).
+	SourceSignalID *int64   `json:"-"`
+	SourceLens     string   `json:"-"`
+	ScreenHits     []string `json:"-"`
 }
 
 type Sidecar struct {
@@ -217,10 +222,10 @@ func insertStrategy(ctx context.Context, tx pgx.Tx, runID int64, openedAt time.T
 		 confidence, confidence_why, evidence, invalidation, risks, paper_trade,
 		 state, state_reason, opened_at, closed_at,
 		 buy_window, sell_window, trigger, direction, legs, relation_id, event,
-		 attention_spec, eval_epoch)
+		 attention_spec, eval_epoch, source_signal_id, source_lens, screen_hits)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
 		        make_interval(hours => $15),$16,$17,$18,$19,$20,$21,$22,
-		        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41)`,
+		        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44)`,
 		runID, st.ID, st.Archetype, st.Title, st.Thesis, items, st.PrimaryItemID(),
 		st.Entry, st.Exit, st.EntryPrice, st.ExitPrice, st.KillPrice, st.Horizon, nullIfEmpty(st.Attention),
 		evalWindowHours(st), st.CapitalRequired, st.Size.UnitsUsed,
@@ -236,6 +241,7 @@ func insertStrategy(ctx context.Context, tx pgx.Tx, runID int64, openedAt time.T
 		marshalOrNil(st.Event, st.Event != nil),
 		marshalOrNil(st.AttentionSpec, st.AttentionSpec != nil),
 		epoch,
+		st.SourceSignalID, nullIfEmpty(st.SourceLens), st.ScreenHits,
 	); err != nil {
 		return fmt.Errorf("insert strategy %s: %w", st.ID, err)
 	}
@@ -296,6 +302,9 @@ type Strategy struct {
 	StateReason   *string         `json:"state_reason"`
 	FailureMode   *string         `json:"failure_mode,omitempty"`
 	EvalEpoch     int             `json:"eval_epoch"`
+	SourceSignalID *int64          `json:"source_signal_id,omitempty"`
+	SourceLens    *string         `json:"source_lens,omitempty"`
+	ScreenHits    []string        `json:"screen_hits,omitempty"`
 	OpenedAt      time.Time       `json:"opened_at"`
 	ClosedAt      *time.Time      `json:"closed_at"`
 
@@ -318,7 +327,8 @@ const strategyCols = `strategy_id, run_id, sid, archetype, title, thesis, items,
 	state, state_reason, opened_at, closed_at,
 	extract(epoch from eval_window)::float8,
 	buy_window, sell_window, trigger, direction, legs, relation_id, event, triggered_at,
-	projected_per_1h_gp, attention_spec, failure_mode, eval_epoch`
+	projected_per_1h_gp, attention_spec, failure_mode, eval_epoch,
+	source_signal_id, source_lens, screen_hits`
 
 func scanStrategy(row pgx.Row) (*Strategy, error) {
 	var st Strategy
@@ -330,7 +340,8 @@ func scanStrategy(row pgx.Row) (*Strategy, error) {
 		&st.Confidence, &st.ConfidenceWhy, &st.Invalidation, &st.Risks, &st.PaperTrade,
 		&st.State, &st.StateReason, &st.OpenedAt, &st.ClosedAt,
 		&st.EvalWindowS, &buyW, &sellW, &trig, &st.Direction, &legs, &st.RelationID, &event, &st.TriggeredAt,
-		&st.ProjectedPer1hGp, &attnSpec, &st.FailureMode, &st.EvalEpoch)
+		&st.ProjectedPer1hGp, &attnSpec, &st.FailureMode, &st.EvalEpoch,
+		&st.SourceSignalID, &st.SourceLens, &st.ScreenHits)
 	if err != nil {
 		return nil, err
 	}

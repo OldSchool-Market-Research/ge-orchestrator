@@ -218,3 +218,24 @@ baseline; each phase gets its own before/after on the /api/calibration chart.
    2026-10-30); the rest only log "would veto" lines. C stays log-only: the rule
    would have blocked 99 of its 185 ships over Oct 16-30, which earned 69M.*
 3. Graveyard cooldown 14d — too long for a market this fast?
+
+## Method provenance and lane allocation (research review P1, 2026-10-30)
+
+Everything above teaches which items to avoid and how much to discount a claim.
+None of it can say which research method pays, because strategies didn't record
+where they came from. P1 starts recording that, in log mode.
+
+- **Provenance** (`store.AttachProvenance`, inferred at ingest): `source_signal_id`,
+  `source_lens` (signal kind, `sweep:<lens>` when the brief showed the item in its
+  lane's collector rows, or `free`) and `screen_hits` (every collector lens holding
+  it, shown or not). Screens are association, not cause: the agent runs similar
+  screens of its own.
+- **Allocation** (`store.CompileAllocation`, each collector sweep, append-only
+  `lane_allocation`): ships, 6h survival, confirms and realized gp per lane and per
+  source, how each signal kind's signals ended, and the lane weights that would
+  follow. Guardrails: 20 closes before a lane moves, 0.25 a day at most, 0.25 floor
+  for a live lane, and only the operator sets 0. `GET /api/allocation`.
+- **Log mode:** no run reads these weights. Realized is still a spread mark rather
+  than simulated fills, so the weights are a record to judge first.
+- **Regime** (`store.RecordRegime`, `regime_snapshots`, `GET /api/regime`): one row
+  per sweep, logged now because conditioning on it later needs weeks of history.

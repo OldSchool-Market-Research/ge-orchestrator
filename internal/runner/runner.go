@@ -53,9 +53,10 @@ type Runner struct {
 }
 
 type activeRun struct {
-	runID  int64
-	params brief.Params
-	done   chan struct{}
+	runID       int64
+	params      brief.Params
+	precomputed bool // the brief carries the whole-market scans
+	done        chan struct{}
 }
 
 // ActiveRunID returns the in-flight run id, or 0.
@@ -115,7 +116,7 @@ func (r *Runner) Trigger(ctx context.Context, p brief.Params, source string) (in
 		return 0, err
 	}
 
-	run := &activeRun{runID: runID, params: p, done: make(chan struct{})}
+	run := &activeRun{runID: runID, params: p, precomputed: brief.HasPrecomputedScans(briefText), done: make(chan struct{})}
 	r.active = run
 	go r.execute(runID, workspace, briefPath, run)
 	return runID, nil
@@ -140,6 +141,9 @@ func (r *Runner) execute(runID int64, workspace, briefPath string, run *activeRu
 		"GE_AGENT_DIRECTIVE=" + r.Cfg.Directive,
 		"GE_AGENT_BRIEF_FILE=" + briefPath,
 	}, r.Cfg.ExtraEnv...)
+	if run.precomputed {
+		cmd.Env = append(cmd.Env, "GE_AGENT_PRECOMPUTED_SCANS=1")
+	}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -249,6 +253,11 @@ func (r *Runner) ingest(ctx context.Context, runID int64, p brief.Params, worksp
 		return fmt.Errorf("parse sidecar: %w", err)
 	}
 	now := time.Now().UTC()
+	// Provenance needs the run's signals before the verdicts below resolve them.
+	// Best-effort: a lost attribution must not cost the run its ships.
+	if err := r.Store.AttachProvenance(ctx, runID, sc.RunStartedAt, sc.Strategies, sc.SignalVerdicts); err != nil {
+		log.Printf("run %d: provenance: %v", runID, err)
+	}
 	accepted, vetoed := r.vet(ctx, p, sc.Strategies)
 	for _, v := range vetoed {
 		log.Printf("run %d: strategy %s %s", runID, v.Strategy.ID, v.Reason)
@@ -256,6 +265,9 @@ func (r *Runner) ingest(ctx context.Context, runID int64, p brief.Params, worksp
 	}
 	if err := r.Store.InsertStrategies(ctx, runID, now, accepted, vetoed); err != nil {
 		return err
+	}
+	if err := r.Store.LinkSignalStrategies(ctx, runID); err != nil {
+		log.Printf("run %d: link signals: %v", runID, err)
 	}
 	if r.Notify != nil {
 		// The ping gate weighs projections by the same calibration rows

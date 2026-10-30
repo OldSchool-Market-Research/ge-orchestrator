@@ -215,15 +215,17 @@ func maybeTriggerOnSignals(ctx context.Context, st *store.Store, r *runner.Runne
 
 // agentEnvPassthrough forwards every GE_AGENT_* var from the pod
 // environment to the spawned agent, except the ones the runner owns
-// (directive, brief, and the workspace-relative reports dir). Before this,
+// (directive, brief, the workspace-relative reports dir, and the per-run
+// precomputed-scans flag). Before this,
 // runner.execute's fixed five-var env made every agent tuning knob
 // (GE_AGENT_MAX_TURNS, _RUN_TIMEOUT_S, _KIMI_MODEL, ...)
 // unreachable from the deployment — frozen at compile-time defaults.
 func agentEnvPassthrough() []string {
 	owned := map[string]bool{
-		"GE_AGENT_DIRECTIVE":   true,
-		"GE_AGENT_BRIEF_FILE":  true,
-		"GE_AGENT_REPORTS_DIR": true,
+		"GE_AGENT_DIRECTIVE":         true,
+		"GE_AGENT_BRIEF_FILE":        true,
+		"GE_AGENT_REPORTS_DIR":       true,
+		"GE_AGENT_PRECOMPUTED_SCANS": true,
 	}
 	var extra []string
 	for _, kv := range os.Environ() {

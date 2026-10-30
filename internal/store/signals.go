@@ -129,10 +129,10 @@ func (s *Store) NextSignals(ctx context.Context, weights map[string]float64, lim
 	return pickSignals(pending, weights, limit), nil
 }
 
-// kindLane is the lane whose brief weight governs each signal kind. 'watch'
+// kindLane is the lane behind each signal kind and collector lens. 'watch'
 // (revalidation of the portfolio) answers to no lane.
 var kindLane = map[string]string{
-	"combo": "C", "vflip": "F", "flip": "F", "hvflip": "B", "volume": "V",
+	"combo": "C", "vflip": "F", "flip": "F", "hvflip": "B", "volume": "V", "volume_how": "V",
 	"seasonal": "S", "band": "H",
 }
 
@@ -240,11 +240,12 @@ func (s *Store) ResolveSignal(ctx context.Context, signalID int64, verdict, reas
 	return nil
 }
 
-// ReleaseRunSignals returns a failed run's assigned signals to the queue so
-// the next run picks them up.
+// ReleaseRunSignals returns a run's unanswered signals to the queue so the next
+// run picks them up. A signal going back is open again, so it drops any link to a
+// strategy inferred for it; the strategy keeps its source_signal_id.
 func (s *Store) ReleaseRunSignals(ctx context.Context, runID int64) error {
 	_, err := s.Pool.Exec(ctx, `UPDATE orchestrator.signals
-		SET status='pending', run_id=NULL WHERE run_id=$1 AND status='assigned'`, runID)
+		SET status='pending', run_id=NULL, strategy_id=NULL WHERE run_id=$1 AND status='assigned'`, runID)
 	return err
 }
 
@@ -280,10 +281,21 @@ func (s *Store) collectSignals(ctx context.Context, query string, args ...any) (
 
 // --- trend snapshots (the durable market-intelligence base) ---
 
+// BriefSweepRows is how many of a lens's top rows the brief shows, which is also
+// what provenance credits to it. The same-hour volume lens shows more: it stands
+// in for a refused 25-row tool call, and its very top rows are often illiquid.
+func BriefSweepRows(lens string) int {
+	if lens == "volume_how" {
+		return 15
+	}
+	return 5
+}
+
 type TrendRow struct {
 	AsOf    time.Time       `json:"as_of"`
 	Lens    string          `json:"lens"`
 	ItemID  int             `json:"item_id"`
+	Rank    int             `json:"rank,omitempty"` // 1 = the lens's top row; 0 on rows before migration 019
 	Metrics json.RawMessage `json:"metrics"`
 }
 
@@ -295,19 +307,20 @@ func (s *Store) InsertTrendSnapshots(ctx context.Context, asOf time.Time, lens s
 	}
 	defer tx.Rollback(ctx)
 	for _, r := range rows {
-		if _, err := tx.Exec(ctx, `INSERT INTO orchestrator.trend_snapshots (as_of, lens, item_id, metrics)
-			VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`, asOf, lens, r.ItemID, r.Metrics); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO orchestrator.trend_snapshots (as_of, lens, item_id, metrics, rank)
+			VALUES ($1,$2,$3,$4,nullif($5::int, 0)) ON CONFLICT DO NOTHING`, asOf, lens, r.ItemID, r.Metrics, r.Rank); err != nil {
 			return err
 		}
 	}
 	return tx.Commit(ctx)
 }
 
-// LatestTrends returns the most recent sweep's rows for a lens.
+// LatestTrends returns the most recent sweep's rows for a lens, top-ranked first.
 func (s *Store) LatestTrends(ctx context.Context, lens string, limit int) ([]TrendRow, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT as_of, lens, item_id, metrics
+	rows, err := s.Pool.Query(ctx, `SELECT as_of, lens, item_id, metrics, coalesce(rank, 0)
 		FROM orchestrator.trend_snapshots
 		WHERE lens=$1 AND as_of = (SELECT max(as_of) FROM orchestrator.trend_snapshots WHERE lens=$1)
+		ORDER BY rank NULLS LAST, item_id
 		LIMIT $2`, lens, limit)
 	if err != nil {
 		return nil, err
@@ -316,7 +329,7 @@ func (s *Store) LatestTrends(ctx context.Context, lens string, limit int) ([]Tre
 	var out []TrendRow
 	for rows.Next() {
 		var r TrendRow
-		if err := rows.Scan(&r.AsOf, &r.Lens, &r.ItemID, &r.Metrics); err != nil {
+		if err := rows.Scan(&r.AsOf, &r.Lens, &r.ItemID, &r.Metrics, &r.Rank); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
