@@ -257,7 +257,7 @@ func (s *Store) ProcessTop(ctx context.Context, metric string, since time.Time, 
 	rows, err := s.Pool.Query(ctx, `
 		WITH s AS (
 		  SELECT recipe_id, ts, margin_slow, unknown_limit_legs, `+metric+` AS v,
-		         rank() OVER (PARTITION BY ts ORDER BY `+metric+` DESC NULLS LAST) AS rk
+		         rank() OVER (PARTITION BY ts ORDER BY unknown_limit_legs > 0, `+metric+` DESC NULLS LAST) AS rk
 		  FROM process_snapshots WHERE ts >= $1
 		)
 		SELECT s.recipe_id, p.name, p.category, count(*), count(s.margin_slow), count(s.v),

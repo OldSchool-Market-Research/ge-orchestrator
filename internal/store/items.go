@@ -41,7 +41,7 @@ type ItemRow struct {
 	LowTime     *time.Time `json:"low_time"`
 	Margin      *int64     `json:"margin"`       // post-tax flip margin of that row; null unless both sides traded in 24h
 	ROIPct      *float64   `json:"roi_pct"`      // margin / low
-	LimitProfit *int64     `json:"limit_profit"` // upper bound: margin x min(buy limit, thinner side's 24h volume / 6); null if either is 0
+	LimitProfit *int64     `json:"limit_profit"` // upper bound: margin x min(buy limit, thinner side's 24h volume / 6); null if either is 0 or unknown
 	HighVol24h  int64      `json:"high_vol_24h"`
 	LowVol24h   int64      `json:"low_vol_24h"`
 }
