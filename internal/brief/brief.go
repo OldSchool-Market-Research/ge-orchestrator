@@ -30,11 +30,12 @@ type Params struct {
 // C is the primary lane; S/H are retired as shippable kinds but stay in the
 // order so their paper-trade track record still renders (it is the evidence
 // for why they were retired).
-var archetypeOrder = []string{"C", "F", "B", "V", "U", "S", "H"}
+var archetypeOrder = []string{"C", "P", "F", "B", "V", "U", "S", "H"}
 
 var archetypeNames = map[string]string{
 	"F": "volume flip", "B": "high-value flip",
 	"S": "seasonal window (retired)", "V": "volume anomaly", "C": "conversion",
+	"P": "processing recipe, gp per hour of play",
 	"U": "update/event", "H": "swing hold (retired)",
 }
 
@@ -58,7 +59,8 @@ func Defaults() Params {
 		// (roundtrips-gated, spread-capture eval), not as the mid-marked
 		// multi-day hold this lane actually was.
 		CapitalGp: 50_000_000, Risk: "low", MinConfidence: "medium",
-		Archetypes: map[string]float64{"F": 0, "B": 0, "V": 0.5, "C": 1.5, "U": 0.5},
+		// P is new (Oct 30): recipes the harness can now judge in gp per hour of play.
+		Archetypes: map[string]float64{"F": 0, "B": 0, "V": 0.5, "C": 1.5, "U": 0.5, "P": 1},
 		// No default notes: the operator's old ones described the two flip screens
 		// (vflip, hvflip), both now off, and the directive makes notes priority
 		// candidates. Git history has them for when a flip lane returns.
@@ -81,7 +83,7 @@ func (p *Params) Validate() error {
 	}
 	for k, w := range p.Archetypes {
 		if _, ok := archetypeNames[k]; !ok {
-			return fmt.Errorf("archetypes: unknown archetype %q (F/B/V/C/U, retired: S/H)", k)
+			return fmt.Errorf("archetypes: unknown archetype %q (F/B/V/C/U/P, retired: S/H)", k)
 		}
 		if w < 0 || w > 2 {
 			return fmt.Errorf("archetypes[%s]: weight must be 0..2", k)
@@ -117,8 +119,8 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 		}
 		b.WriteString("\n")
 	}
-	b.WriteString("- Objective: rank ALL viable options by absolute post-tax gp/day at fillable size. The floor is absolute (C: 200k gp/cycle, F: 400k gp/cycle = 100k gp/hr, B: 100k/cycle) — dismiss below-floor candidates whatever their ROI%. Shipping NOTHING is a legitimate outcome when nothing clears the bar.\n")
-	b.WriteString("- Every F/B/C strategy must state its attention contract (offer cadence, longest safe unattended window, reaction risk) — the operator decides what fits their day.\n")
+	b.WriteString("- Objective: rank ALL viable options by absolute post-tax gp/day at fillable size. The floor is absolute (C: 200k gp/cycle, P: 250k gp per hour of play, F: 400k gp/cycle = 100k gp/hr, B: 100k/cycle) — dismiss below-floor candidates whatever their ROI%. Shipping NOTHING is a legitimate outcome when nothing clears the bar.\n")
+	b.WriteString("- Every F/B/C/P strategy must state its attention contract (offer cadence, longest safe unattended window, reaction risk) — the operator decides what fits their day.\n")
 
 	cal, calErr := s.CalibrationLatest(ctx)
 	if calErr == nil && len(cal) > 0 {
@@ -523,6 +525,7 @@ func HasPrecomputedScans(text string) bool {
 func writeSweep(ctx context.Context, b *strings.Builder, s *store.Store, p Params, at time.Time) {
 	lenses := []struct{ lens, lane, title string }{
 		{"combo", "C", "lane C candidates: conversions priced both directions, ranked by budget-sized gp/4h (budget_cycle_gp — already sized to the research budget, do not dismiss on per-conversion margin)"},
+		{"process", "P", "lane P candidates: processing recipes ranked by gp per hour of play at the harness's haircut (gp_hr; view_gp_hr is the screen's number, which assumes the whole market)"},
 		{"vflip", "F", "lane F candidates: volume flips ranked by margin x buy_limit (gp_cycle)"},
 		{"hvflip", "B", "lane B candidates: 10M+ flips ranked by absolute post-tax margin"},
 		{"volume", "V", "volume anomalies vs the trailing 7 days"},

@@ -93,19 +93,24 @@ func attribute(st SidecarStrategy, assigned []Signal, verdicts []SignalVerdict, 
 	return nil, "free"
 }
 
-// signalMatches: the signal's item is the strategy's primary item, or, for a
-// conversion, the signal priced the same recipe.
+// signalMatches: the signal's item is the strategy's primary item, or the signal
+// priced the same recipe (a conversion's relation, a processing recipe).
 func signalMatches(sig Signal, st SidecarStrategy) bool {
 	if sig.ItemID == st.PrimaryItemID() {
 		return true
 	}
-	if st.RelationID == nil {
+	if st.RelationID == nil && st.RecipeID == nil {
 		return false
 	}
 	var m struct {
 		RelationID *int `json:"relation_id"`
+		RecipeID   *int `json:"recipe_id"`
 	}
-	return json.Unmarshal(sig.Metrics, &m) == nil && m.RelationID != nil && *m.RelationID == *st.RelationID
+	if json.Unmarshal(sig.Metrics, &m) != nil {
+		return false
+	}
+	return (st.RelationID != nil && m.RelationID != nil && *m.RelationID == *st.RelationID) ||
+		(st.RecipeID != nil && m.RecipeID != nil && *m.RecipeID == *st.RecipeID)
 }
 
 // screenHits maps each item to the lenses whose latest sweep before the run held

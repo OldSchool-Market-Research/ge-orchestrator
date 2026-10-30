@@ -240,7 +240,7 @@ func (s *Store) laneYields(ctx context.Context) ([]LaneYield, []SourceYield, []F
 		       count(*) FILTER (WHERE w.closed_in AND w.hours >= $2),
 		       count(*) FILTER (WHERE w.closed_in AND w.state = 'confirmed'),
 		       coalesce(sum(coalesce(pos.final_equity_gp, est.med_1h * greatest(w.hours, 0)))
-		                FILTER (WHERE w.closed_in), 0)::bigint
+		                FILTER (WHERE w.closed_in AND w.archetype <> 'P'), 0)::bigint
 		FROM w
 		LEFT JOIN LATERAL (
 			SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY e.realized_per_1h_gp) AS med_1h
@@ -303,7 +303,9 @@ func (s *Store) laneYields(ctx context.Context) ([]LaneYield, []SourceYield, []F
 	}
 	lanes := make([]LaneYield, 0, len(byLane))
 	for _, l := range byLane {
-		if l.Closed > 0 {
+		// P's realized is per hour of play, so it has no gp per ship to compare with
+		// the passive lanes and no target follows; its weight holds.
+		if l.Closed > 0 && l.Lane != "P" {
 			v := l.EstRealizedGp / int64(l.Closed)
 			l.PerShipGp = &v
 		}

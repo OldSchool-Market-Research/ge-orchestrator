@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestProposalFingerprint(t *testing.T) {
@@ -133,4 +134,71 @@ func TestProposalLifecycle(t *testing.T) {
 	if got, err := s.RecipeOnFile(ctx, ProposedRecipe{Inputs: r.Outputs, Outputs: r.Inputs}); err != nil || got != "" {
 		t.Errorf("the reverse of a one-way recipe is new: %q %v", got, err)
 	}
+}
+
+// Lane P reaches the database: recipe_id round-trips, P leaves the P&L, and the
+// process views answer. Needs a migrated scratch DB: set STORE_TEST_DSN.
+func TestLanePStorage(t *testing.T) {
+	dsn := os.Getenv("STORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("STORE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	if _, err := s.OrphanRunningRuns(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer s.OrphanRunningRuns(ctx)
+	runID, err := s.CreateRun(ctx, json.RawMessage(`{}`), "test brief", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.strategies WHERE run_id=$1`, runID)
+	var st SidecarStrategy
+	if err := json.Unmarshal([]byte(`{"id":"P-x-20261030","archetype":"P","title":"t","thesis":"t",
+		"items":[{"name":"x","id":876600}],"entry":"e","exit":"x","entry_price":1,"exit_price":2,
+		"horizon":"h","capital_required":1,"size":{"buy_limit":1,"vol_constrained":1,"units_used":1},
+		"expected_value":{"per_cycle_gp":1,"per_1h_gp":1,"per_day_gp":1,"roi_pct":1},
+		"confidence":"medium","invalidation":"i","attention":"hands-on","recipe_id":16}`), &st); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertStrategies(ctx, runID, time.Now().UTC().Add(-time.Hour), []SidecarStrategy{st}, nil); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.StrategiesForRun(ctx, runID)
+	if err != nil || len(list) != 1 || list[0].RecipeID == nil || *list[0].RecipeID != 16 || list[0].State != "open" {
+		t.Fatalf("round trip: %+v %v", list, err)
+	}
+	if _, err := s.Pool.Exec(ctx, `UPDATE orchestrator.strategies SET state='killed', closed_at=now() WHERE run_id=$1`, runID); err != nil {
+		t.Fatal(err)
+	}
+	pnl, err := s.PnL(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range pnl {
+		if r.Archetype == "P" {
+			t.Errorf("per-hour-of-play pace can't be added up as gp: %+v", r)
+		}
+	}
+	a, err := s.CompileAllocation(ctx, map[string]float64{"C": 1.5, "P": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range a.Lanes {
+		if l.Lane == "P" && (l.PerShipGp != nil || l.EstRealizedGp != 0 || l.Target != nil) {
+			t.Errorf("P has no gp per ship to compare: %+v", l)
+		}
+	}
+	if a.Weights["P"] != 1 {
+		t.Errorf("P's weight holds: %v", a.Weights)
+	}
+	if _, _, err := s.ProcessPersistence(ctx, 16); err != nil {
+		t.Errorf("persistence: %v", err)
+	}
+	s.Pool.Exec(ctx, `DELETE FROM orchestrator.lane_allocation`)
 }

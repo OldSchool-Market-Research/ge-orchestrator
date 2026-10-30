@@ -16,6 +16,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/osrs-ge/ge-orchestrator/internal/eval"
 	"github.com/osrs-ge/ge-orchestrator/internal/store"
 )
 
@@ -129,6 +130,7 @@ func (c *Collector) Cycle(ctx context.Context) int {
 	newSignals += c.sweepFlip(ctx, asOf)
 	newSignals += c.sweepHighValue(ctx, asOf)
 	newSignals += c.sweepCombo(ctx, asOf)
+	newSignals += c.sweepProcess(ctx, asOf)
 	// The slow full-history scans (~3 min together) run after the price-sensitive
 	// lenses, so they don't delay detection.
 	newSignals += c.sweepSeasonal(ctx, asOf)  // snapshots only — timing evidence, no signals
@@ -746,6 +748,82 @@ func (c *Collector) sweepCombo(ctx context.Context, asOf time.Time) int {
 	}
 	return persist(c, ctx, asOf, "combo", parsed, func(r comboRow) (int, string, bool) {
 		return r.PrimaryItemID, r.PrimaryName, r.BudgetCycleGp >= c.Cfg.ComboGpCycleMin
+	})
+}
+
+// --- lane P: processing recipes ---
+// Every recipe that can be sized, ranked by what an hour of play pays at the
+// harness's haircut (eval.processHonest: 0.5% slippage both sides, 15% of the market,
+// the research budget). Not the view's gp_hr, which assumes all of the market's
+// volume. A recipe linked to a C relation is lane C's. A signal also needs the
+// persistence the vetter requires, so a run isn't sent after a recipe it can't ship.
+
+const processSweepSQL = `
+WITH legs AS (
+  SELECT recipe_id,
+         sum(CASE WHEN side = 'buy' THEN qty * low END) AS gross_in,
+         sum(CASE WHEN side = 'sell' THEN qty * high END) AS gross_out,
+         (array_agg(item_id ORDER BY qty DESC, item_id) FILTER (WHERE side = 'sell'))[1] AS output_item
+  FROM process_legs_now GROUP BY 1
+),
+honest AS (
+  SELECT q.recipe_id, q.name, q.category, q.throughput, l.output_item,
+         round(q.gp_hr)::bigint AS view_gp_hr,
+         q.margin_slow - 0.005 * (l.gross_in + l.gross_out) AS margin,
+         least(coalesce(q.actions_per_hour, 1e12), coalesce(q.limit_actions_per_hour, 1e12),
+               0.15 * q.market_actions_per_hour, $1::numeric / nullif(l.gross_in, 0) / 4) AS rate
+  FROM process_quotes_now q
+  JOIN process_recipes r USING (recipe_id)
+  JOIN legs l USING (recipe_id)
+  WHERE r.relation_name IS NULL AND q.throughput <> 'unknown' AND q.unknown_limit_legs = 0
+    AND q.margin_slow IS NOT NULL AND l.output_item IS NOT NULL
+),
+snap AS (
+  SELECT recipe_id, count(*) AS hours, count(*) FILTER (WHERE gp_hr > 0) AS positive
+  FROM process_snapshots WHERE ts > now() - interval '24 hours' GROUP BY 1
+)
+SELECT h.recipe_id, h.name, h.category, h.throughput, h.output_item,
+       round(h.margin * h.rate)::bigint AS gp_hr, h.view_gp_hr,
+       round(h.rate, 1)::float8 AS actions_per_hour,
+       coalesce(s.hours, 0), coalesce(s.positive, 0)
+FROM honest h
+LEFT JOIN snap s USING (recipe_id)
+WHERE h.rate IS NOT NULL
+ORDER BY h.margin * h.rate DESC
+LIMIT $2`
+
+func (c *Collector) sweepProcess(ctx context.Context, asOf time.Time) int {
+	rows, err := c.Store.Pool.Query(ctx, processSweepSQL, c.Cfg.ResearchBudgetGp, c.Cfg.SnapshotTopN)
+	if err != nil {
+		log.Printf("collect: process sweep: %v", err)
+		return 0
+	}
+	defer rows.Close()
+	type processRow struct {
+		RecipeID       int     `json:"recipe_id"`
+		Name           string  `json:"name"`
+		Category       string  `json:"category"`
+		Throughput     string  `json:"throughput"`
+		OutputItem     int     `json:"output_item"`
+		GpHr           int64   `json:"gp_hr"`
+		ViewGpHr       *int64  `json:"view_gp_hr"`
+		ActionsPerHour float64 `json:"actions_per_hour"`
+		Hours          int     `json:"hours_24h"`
+		Positive       int     `json:"positive_hours_24h"`
+	}
+	var parsed []processRow
+	for rows.Next() {
+		var r processRow
+		if err := rows.Scan(&r.RecipeID, &r.Name, &r.Category, &r.Throughput, &r.OutputItem,
+			&r.GpHr, &r.ViewGpHr, &r.ActionsPerHour, &r.Hours, &r.Positive); err != nil {
+			log.Printf("collect: process scan: %v", err)
+			return 0
+		}
+		parsed = append(parsed, r)
+	}
+	return persist(c, ctx, asOf, "process", parsed, func(r processRow) (int, string, bool) {
+		persistent := r.Hours >= 12 && float64(r.Positive) >= 0.8*float64(r.Hours)
+		return r.OutputItem, r.Name, r.GpHr >= eval.FloorPGpHr && persistent
 	})
 }
 

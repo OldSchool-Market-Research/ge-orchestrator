@@ -239,6 +239,7 @@ func (s *Store) PnL(ctx context.Context) ([]PnLRow, error) {
 		LEFT JOIN orchestrator.positions pos ON pos.strategy_id = s.strategy_id
 		LEFT JOIN items i ON i.item_id = s.primary_item_id
 		WHERE s.state <> 'vetoed' AND NOT (s.state = 'armed' AND s.triggered_at IS NULL)
+		  AND s.archetype <> 'P' -- per hour of play: pace x hours open would invent gp
 		ORDER BY s.strategy_id`)
 	if err != nil {
 		return nil, err

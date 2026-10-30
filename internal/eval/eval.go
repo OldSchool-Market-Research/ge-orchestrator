@@ -64,6 +64,9 @@ func policyFor(archetype string) Policy {
 		// Intraday cycles: evaluate every ~15m; three consecutive floor
 		// breaches (~45m of collapsed spread) kills.
 		return Policy{KillConsecutive: 3, ConfirmHealthy: confirmHealthyPct, ConfirmRatioMin: confirmRatioMin, MinTickGap: 15 * time.Minute}
+	case "P":
+		// A market a player is working live: same pace as F.
+		return Policy{KillConsecutive: 3, ConfirmHealthy: confirmHealthyPct, ConfirmRatioMin: confirmRatioMin, MinTickGap: 15 * time.Minute}
 	case "B":
 		// Day-scale holds: hourly cadence, slower kill like H.
 		return Policy{KillConsecutive: 6, ConfirmHealthy: confirmHealthyPct, ConfirmRatioMin: confirmRatioMin, MinTickGap: time.Hour}
@@ -200,6 +203,8 @@ func (ev *Evaluator) Compute(ctx context.Context, st store.Strategy) (store.Eval
 		return ev.computeVolume(ctx, st)
 	case "C":
 		return ev.computeCombo(ctx, st)
+	case "P":
+		return ev.computeProcess(ctx, st)
 	case "U":
 		return ev.computeUpdate(ctx, st)
 	case "H":

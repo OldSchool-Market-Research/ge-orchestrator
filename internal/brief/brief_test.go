@@ -201,6 +201,9 @@ func TestDefaultsKeepFlipLanesOff(t *testing.T) {
 			t.Errorf("lane %s must be explicitly off, got %v (ok=%v)", lane, w, ok)
 		}
 	}
+	if p.Archetypes["P"] <= 0 {
+		t.Errorf("lane P on: %+v", p.Archetypes)
+	}
 	if p.Archetypes["C"] <= 0 || strings.TrimSpace(p.Notes) != "" {
 		t.Errorf("C on and no flip notes: %+v", p)
 	}

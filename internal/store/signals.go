@@ -47,6 +47,7 @@ const (
 	// signalScore is a detection's size in its lens's own units, for the repeat
 	// guard's escape. NULL (no such metric) never escapes.
 	signalScore = `CASE $1::text WHEN 'combo' THEN (%[1]s->>'budget_cycle_gp')::float8
+		WHEN 'process' THEN (%[1]s->>'gp_hr')::float8
 		WHEN 'volume' THEN abs((%[1]s->>'z')::float8)
 		ELSE (%[1]s->>'gp_cycle')::float8 END`
 )
@@ -132,7 +133,7 @@ func (s *Store) NextSignals(ctx context.Context, weights map[string]float64, lim
 // kindLane is the lane behind each signal kind and collector lens. 'watch'
 // (revalidation of the portfolio) answers to no lane.
 var kindLane = map[string]string{
-	"combo": "C", "vflip": "F", "flip": "F", "hvflip": "B", "volume": "V", "volume_how": "V",
+	"combo": "C", "vflip": "F", "flip": "F", "hvflip": "B", "volume": "V", "volume_how": "V", "process": "P",
 	"seasonal": "S", "band": "H",
 }
 

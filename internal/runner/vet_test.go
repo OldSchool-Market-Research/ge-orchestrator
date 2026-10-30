@@ -428,3 +428,41 @@ func TestSizeOverstatedCapitalIsOnlyNoted(t *testing.T) {
 		t.Errorf("consistent sizes: got note %q", note)
 	}
 }
+
+func TestProcessVeto(t *testing.T) {
+	proj := func(v int64) *int64 { return &v }
+	good := &eval.ProcessSnap{Throughput: "fixed"}
+	if reason := processVeto(good, proj(250_000)); reason != "" {
+		t.Errorf("exactly the floor: %q", reason)
+	}
+	cases := []struct {
+		name string
+		snap eval.ProcessSnap
+		proj *int64
+		want string
+	}{
+		{"under the floor", eval.ProcessSnap{Throughput: "fixed"}, proj(249_999), "lane-P floor"},
+		{"linked", eval.ProcessSnap{Throughput: "fixed", Linked: true}, proj(900_000), "lane C"},
+		{"no rate", eval.ProcessSnap{Throughput: "unknown"}, proj(900_000), "no known rate"},
+		{"no limit", eval.ProcessSnap{Throughput: "fixed", UnknownLimitLegs: 1}, proj(900_000), "buy limit"},
+		{"no price or no earnings", eval.ProcessSnap{Throughput: "fixed"}, nil, "doesn't earn"},
+	}
+	for _, c := range cases {
+		if reason := processVeto(&c.snap, c.proj); !strings.Contains(reason, c.want) {
+			t.Errorf("%s: %q", c.name, reason)
+		}
+	}
+}
+
+func TestProcessPersistenceVeto(t *testing.T) {
+	for _, c := range []struct {
+		positive, total int
+		veto            bool
+	}{
+		{12, 12, false}, {20, 24, false}, {19, 24, true}, {11, 11, true}, {0, 0, true},
+	} {
+		if got := processPersistenceVeto(c.positive, c.total) != ""; got != c.veto {
+			t.Errorf("%d of %d: veto=%v", c.positive, c.total, got)
+		}
+	}
+}
