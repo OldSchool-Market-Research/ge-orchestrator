@@ -239,3 +239,7 @@ where they came from. P1 starts recording that, in log mode.
   than simulated fills, so the weights are a record to judge first.
 - **Regime** (`store.RecordRegime`, `regime_snapshots`, `GET /api/regime`): one row
   per sweep, logged now because conditioning on it later needs weeks of history.
+
+## C's measurement epoch 2 (2026-10-30)
+
+The C evaluator measured thin legs with short windows: volume from the last 30 minutes x 8, and a fixed 15-minute freshness bar. A leg that hadn't printed in half an hour read as 0 conversions, so realized gp was 0 on 59% of combine ticks despite margins positive 99% of the time, and 83% of combine ticks were stale. Both now use the same terms as `combo_quote`, the collector and the directive: real trailing 4h volume, and quote age against the leg's own trade cadence. Realized gp and tick health mean something different now, so C moved to epoch 2 (`Store.Epochs`, set in main): calibration and lane yields restart for it, and the scoreboard's ratio reads the newest epoch only.

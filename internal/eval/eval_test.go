@@ -290,8 +290,8 @@ func comboStrategy() store.Strategy {
 
 func TestComboMarginMath(t *testing.T) {
 	src := &fakeSource{snaps: map[int]*Snap{
-		139:  {Low: i64(6900), High: i64(7000), LowAgeS: iptr(120), HighAgeS: iptr(120), Vol30m: 9000},
-		2434: {Low: i64(9300), High: i64(9500), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000},
+		139:  {Low: i64(6900), High: i64(7000), LowAgeS: iptr(120), HighAgeS: iptr(120), Vol30m: 9000, Vol4h: 72000, HighTicks24h: 288, LowTicks24h: 288},
+		2434: {Low: i64(9300), High: i64(9500), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000, Vol4h: 48000, HighTicks24h: 288, LowTicks24h: 288},
 	}}
 	ev := fixedEvaluator(src, tue1200)
 	e, checks, err := ev.computeCombo(context.Background(), comboStrategy())
@@ -309,8 +309,8 @@ func TestComboMarginMath(t *testing.T) {
 
 func TestComboNullLegDegrades(t *testing.T) {
 	src := &fakeSource{snaps: map[int]*Snap{
-		139:  {Low: nil, High: i64(7000), LowAgeS: nil, HighAgeS: iptr(120), Vol30m: 9000},
-		2434: {Low: i64(9300), High: i64(9500), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000},
+		139:  {Low: nil, High: i64(7000), LowAgeS: nil, HighAgeS: iptr(120), Vol30m: 9000, Vol4h: 72000, HighTicks24h: 288, LowTicks24h: 288},
+		2434: {Low: i64(9300), High: i64(9500), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000, Vol4h: 48000, HighTicks24h: 288, LowTicks24h: 288},
 	}}
 	ev := fixedEvaluator(src, tue1200)
 	e, checks, err := ev.computeCombo(context.Background(), comboStrategy())
@@ -330,8 +330,8 @@ func TestComboNullLegDegrades(t *testing.T) {
 
 func TestComboCollapsedMarginKills(t *testing.T) {
 	src := &fakeSource{snaps: map[int]*Snap{
-		139:  {Low: i64(7200), High: i64(7300), LowAgeS: iptr(120), HighAgeS: iptr(120), Vol30m: 9000},
-		2434: {Low: i64(9300), High: i64(9400), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000},
+		139:  {Low: i64(7200), High: i64(7300), LowAgeS: iptr(120), HighAgeS: iptr(120), Vol30m: 9000, Vol4h: 72000, HighTicks24h: 288, LowTicks24h: 288},
+		2434: {Low: i64(9300), High: i64(9400), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000, Vol4h: 48000, HighTicks24h: 288, LowTicks24h: 288},
 	}}
 	// Raw margin: 3x(9400-188) - 4x7200 = 27636 - 28800 = -1164 per conversion.
 	ev := fixedEvaluator(src, tue1200)
@@ -425,8 +425,8 @@ func TestComboKillBarIsAbsolute(t *testing.T) {
 	// sell leg stays at 3x(9500-190) = 27930; the buy leg sets the margin.
 	priced := func(buy int64) *fakeSource {
 		return &fakeSource{snaps: map[int]*Snap{
-			139:  {Low: i64(buy), High: i64(buy + 100), LowAgeS: iptr(120), HighAgeS: iptr(120), Vol30m: 9000},
-			2434: {Low: i64(9300), High: i64(9500), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000},
+			139:  {Low: i64(buy), High: i64(buy + 100), LowAgeS: iptr(120), HighAgeS: iptr(120), Vol30m: 9000, Vol4h: 72000, HighTicks24h: 288, LowTicks24h: 288},
+			2434: {Low: i64(9300), High: i64(9500), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000, Vol4h: 48000, HighTicks24h: 288, LowTicks24h: 288},
 		}}
 	}
 	cases := []struct {
@@ -484,5 +484,62 @@ func TestCalFactorFailOpen(t *testing.T) {
 	}
 	if f := ev.calFactor(context.Background(), "C"); f != 1 {
 		t.Errorf("unmeasured archetype: factor = %v, want 1", f)
+	}
+}
+
+// A thin leg that didn't print in the last 30 minutes still has a real 4h volume:
+// the conversion earns, and the volume check passes.
+func TestComboThinLegCountsItsFourHourVolume(t *testing.T) {
+	src := &fakeSource{snaps: map[int]*Snap{
+		139:  {Low: i64(6900), High: i64(7000), LowAgeS: iptr(7200), HighAgeS: iptr(7200), Vol30m: 0, Vol4h: 30000, HighTicks24h: 30, LowTicks24h: 30},
+		2434: {Low: i64(9300), High: i64(9500), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000, Vol4h: 48000, HighTicks24h: 288, LowTicks24h: 288},
+	}}
+	e, checks, err := fixedEvaluator(src, tue1200).computeCombo(context.Background(), comboStrategy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !checks["vol_ok"] {
+		t.Errorf("30000 traded in 4h covers 4 x 1000 conversions: %v", checks)
+	}
+	if !checks["legs_fresh"] {
+		t.Errorf("a 2h quote on a leg with a 48m gap is its normal cadence: %v", checks)
+	}
+	if e.Verdict != "healthy" {
+		t.Errorf("verdict %s", e.Verdict)
+	}
+	if e.RealizedPer1hGp == nil || *e.RealizedPer1hGp == 0 {
+		t.Fatalf("a positive margin on a leg with 4h volume must not realize 0: %v", e.RealizedPer1hGp)
+	}
+}
+
+func TestComboLegConversionsUseFourHourVolume(t *testing.T) {
+	ev := &Evaluator{}
+	// 15% of 400 is 60 units, 15 conversions at qty 4.
+	if got := ev.legConversions(&Snap{Vol30m: 0, Vol4h: 400}, 4); got != 15 {
+		t.Errorf("conversions %d", got)
+	}
+	if got := ev.legConversions(&Snap{Vol30m: 1000, Vol4h: 0}, 1); got != 0 {
+		t.Errorf("no 4h volume, no conversions: %d", got)
+	}
+}
+
+func TestLegFreshUsesTheLegsOwnCadence(t *testing.T) {
+	cases := []struct {
+		name   string
+		age    *int
+		trades int64
+		want   bool
+	}{
+		{"active leg at 15 min", iptr(900), 288, true},
+		{"active leg past 15 min", iptr(901), 288, false},
+		{"thin leg at 2h, 48m gap", iptr(7200), 30, true},
+		{"thin leg at 2h, 12m gap", iptr(7200), 120, false},
+		{"no trades in 24h", iptr(60), 0, false},
+		{"never traded", nil, 40, false},
+	}
+	for _, c := range cases {
+		if got := legFresh(c.age, c.trades); got != c.want {
+			t.Errorf("%s: fresh=%v", c.name, got)
+		}
 	}
 }

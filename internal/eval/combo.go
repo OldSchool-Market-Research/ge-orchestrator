@@ -42,7 +42,7 @@ func ProjectComboPer1h(legs []store.Leg, unitsUsed int64, snaps map[int]*Snap) *
 			sp := ev.slipSell(*price)
 			marginHaircut += (sp - sellTax(sp)) * l.Qty
 		}
-		legConv := int64(ev.participation() * float64(snap.Vol30m*8) / float64(l.Qty))
+		legConv := ev.legConversions(snap, l.Qty)
 		if minLegConversions == nil || legConv < *minLegConversions {
 			minLegConversions = &legConv
 		}
@@ -56,6 +56,34 @@ func ProjectComboPer1h(legs []store.Leg, unitsUsed int64, snaps map[int]*Snap) *
 	}
 	v := marginHaircut * capped / 4
 	return &v
+}
+
+// legFreshGaps is how many of its own typical trade gaps a leg's quote may age
+// before it counts as stale (ge-mcp combo_quote's worst_leg_age_ratio ~3).
+const legFreshGaps = 3
+
+// legConversions is how many conversions per 4h a leg supports at participation,
+// from its real trailing 4h volume. A 30-minute window x 8 reads 0 for any leg that
+// didn't print in the last half hour, which rounded conversions to 0 and zeroed
+// the realized gp of 59% of combine ticks (35% of decants, 17% of sets) over Oct
+// 16-30, on margins that were positive 99% of the time. Backtest on the 176 C closes
+// of that fortnight: +299M becomes +462M, and the median pace of combines goes from
+// 0.00 to 0.24 (still against the old projections).
+func (ev *Evaluator) legConversions(snap *Snap, qty int64) int64 {
+	return int64(ev.participation() * float64(snap.Vol4h) / float64(qty))
+}
+
+// legFresh judges a quote's age against the leg's own trade cadence, like
+// combo_quote and the directive: wall-clock age is not staleness. trades24h counts
+// the 5m buckets where that side printed in the last 24h, so a leg printing in every
+// bucket keeps a 15-minute bar. The old fixed 15 minutes marked 83% of combine ticks
+// (54% of sets) stale, and with 80% healthy ticks needed to confirm, only 3 of 176
+// C closes ever did.
+func legFresh(ageS *int, trades24h int64) bool {
+	if ageS == nil || trades24h <= 0 {
+		return false
+	}
+	return int64(*ageS) <= legFreshGaps*86400/trades24h
 }
 
 // computeCombo evaluates a C strategy: re-price every leg at the latest
@@ -95,19 +123,21 @@ func (ev *Evaluator) computeCombo(ctx context.Context, st store.Strategy) (store
 		}
 		var price *int64
 		var ageS *int
+		var trades24h int64
 		if l.Side == "buy" {
-			price, ageS = snap.Low, snap.LowAgeS
+			price, ageS, trades24h = snap.Low, snap.LowAgeS, snap.LowTicks24h
 		} else {
-			price, ageS = snap.High, snap.HighAgeS
+			price, ageS, trades24h = snap.High, snap.HighAgeS, snap.HighTicks24h
 		}
 		d["price"], d["age_s"], d["vol_30m"] = price, ageS, snap.Vol30m
+		d["vol_4h"], d["trades_24h"] = snap.Vol4h, trades24h
 		legDetails = append(legDetails, d)
 
 		if price == nil {
 			allPriced = false
 			continue
 		}
-		if ageS == nil || *ageS > freshMaxAgeS {
+		if !legFresh(ageS, trades24h) {
 			allFresh = false
 		}
 		if l.Side == "buy" {
@@ -118,13 +148,11 @@ func (ev *Evaluator) computeCombo(ctx context.Context, st store.Strategy) (store
 			sp := ev.slipSell(*price)
 			marginNowHaircut += (sp - sellTax(sp)) * l.Qty
 		}
-		// This leg supports vol_30m*8/qty conversions per 4h at full volume;
-		// participation caps it further.
-		legConv := int64(ev.participation() * float64(snap.Vol30m*8) / float64(l.Qty))
+		legConv := ev.legConversions(snap, l.Qty)
 		if minLegConversions == nil || legConv < *minLegConversions {
 			minLegConversions = &legConv
 		}
-		if units > 0 && snap.Vol30m < units*l.Qty/volDivisor {
+		if units > 0 && snap.Vol4h < units*l.Qty {
 			volOK = false
 		}
 	}
