@@ -811,10 +811,14 @@ func (c *Collector) sweepProcess(ctx context.Context, asOf time.Time) int {
 		Hours          int     `json:"hours_24h"`
 		AtFloor        int     `json:"hours_at_floor_24h"`
 	}
+	persistent := func(r processRow) bool {
+		return r.Hours >= 12 && float64(r.AtFloor) >= 0.8*float64(r.Hours)
+	}
 	var parsed []processRow
 	// Best recipe per output only: two share a signal, keyed on the item, and the later
-	// lower-ranked row would overwrite the better one.
-	seen := map[int]bool{}
+	// lower-ranked row would overwrite the better one. Rows arrive best first, and a
+	// recipe that holds beats a spike ranked above it, or the spike would hide it.
+	at := map[int]int{}
 	for rows.Next() {
 		var r processRow
 		if err := rows.Scan(&r.RecipeID, &r.Name, &r.Category, &r.Throughput, &r.OutputItem,
@@ -822,9 +826,13 @@ func (c *Collector) sweepProcess(ctx context.Context, asOf time.Time) int {
 			log.Printf("collect: process scan: %v", err)
 			return 0
 		}
-		if !seen[r.OutputItem] {
-			seen[r.OutputItem] = true
+		i, seen := at[r.OutputItem]
+		switch {
+		case !seen:
+			at[r.OutputItem] = len(parsed)
 			parsed = append(parsed, r)
+		case !persistent(parsed[i]) && persistent(r):
+			parsed[i] = r
 		}
 	}
 	// A recipe already on the board needs no new look: the vet would refuse it, and a
@@ -840,8 +848,7 @@ func (c *Collector) sweepProcess(ctx context.Context, asOf time.Time) int {
 		}
 	}
 	return persist(c, ctx, asOf, "process", parsed, func(r processRow) (int, string, bool) {
-		persistent := r.Hours >= 12 && float64(r.AtFloor) >= 0.8*float64(r.Hours)
-		return r.OutputItem, r.Name, r.GpHr >= eval.FloorPGpHr && persistent && !open[r.OutputItem]
+		return r.OutputItem, r.Name, r.GpHr >= eval.FloorPGpHr && persistent(r) && !open[r.OutputItem]
 	})
 }
 

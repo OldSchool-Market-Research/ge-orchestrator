@@ -357,7 +357,7 @@ func writeGraveyard(b *strings.Builder, rows []store.GraveyardRow) {
 	if len(rows) == 0 {
 		return
 	}
-	fmt.Fprintf(b, "\n### Graveyard (do not pitch — >=%d kills and net-negative realized in the trailing %dd)\n",
+	fmt.Fprintf(b, "\n### Graveyard (do not pitch — >=%d kills and net-negative realized in the trailing %dd; lane P on kills alone)\n",
 		store.GraveyardMinKills, store.GraveyardWindowDays)
 	b.WriteString("The record has falsified these item x archetype pairs repeatedly. Pitch one only with a materially NEW signal class (e.g. a U event on an F corpse), and say so in the thesis.\n")
 	const maxLines = 15

@@ -314,7 +314,7 @@ func (ev *Evaluator) transition(ctx context.Context, st store.Strategy, now time
 		r := sprintf("window %s elapsed without meeting confirmation", window)
 		if ratio != nil {
 			r += sprintf(" (%d/%d healthy, ratio %.2f vs calibrated bar %.2f)", healthy, total, *ratio, bar)
-			if pol.ConfirmMinPer1hGp > 0 {
+			if !paceOK {
 				r += sprintf(", %d gp/hr realized vs %d needed", int64(*ratio*float64(den)), pol.ConfirmMinPer1hGp)
 			}
 		}

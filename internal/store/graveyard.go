@@ -30,7 +30,7 @@ type GraveyardRow struct {
 // realized_per_1h over its evaluated life × hours in that life.
 func (s *Store) Graveyard(ctx context.Context) ([]GraveyardRow, error) {
 	rows, err := s.Pool.Query(ctx, `SELECT g.primary_item_id, g.item_name, g.archetype,
-			g.kills, g.est_realized::bigint, g.last_killed
+			g.kills, coalesce(g.est_realized, 0)::bigint, g.last_killed
 		FROM (
 			SELECT s.primary_item_id,
 			       max(coalesce(s.items->0->>'name', 'unknown item')) AS item_name,
