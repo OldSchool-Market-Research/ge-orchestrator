@@ -169,7 +169,7 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 			closed := r.N - r.Open - r.Armed
 			line := fmt.Sprintf("- %s: n=%d (%d open, %d armed)", r.Archetype, r.N, r.Open, r.Armed)
 			if r.Vetoed > 0 {
-				line += fmt.Sprintf(", %d vetoed at ship time — check kill_price and capital against a live quote before shipping", r.Vetoed)
+				line += fmt.Sprintf(", %d vetoed at ship time — check kill_price and capital against a live quote, and that units_used x entry_price matches capital_required, before shipping", r.Vetoed)
 			}
 			if closed > 0 {
 				surv := float64(r.Confirmed) / float64(closed) * 100

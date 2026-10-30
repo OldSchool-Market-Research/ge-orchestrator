@@ -44,6 +44,19 @@ const (
 	// 1-3%; cheap-potion decants can exceed 10% only far below the floor.
 	noArbCapFraction = 0.10
 	noArbCapMinGp    = 500_000
+	// sizeConsistencyTolerance bounds how far units_used x entry_price may
+	// run ABOVE capital_required (and above the research budget): both
+	// describe ONE batch. On prod (60 days to 2026-10-29) 90% of C and 96%
+	// of F ships agree within it. Of the 50 accepted outliers, 30 understate
+	// capital against units x entry: 17 run over the budget (1909's
+	// units_used was the raw shard buy limit, 1000x its capital; big-ticket
+	// conversions sized at their buy bound with capital for one), the rest
+	// either overstate units (the 1606/1724 dose family, 4x) or price capital
+	// for one conversion while units_used is right (the 1538/1539 decants).
+	// Either way the batch the money describes isn't the batch the evaluator
+	// sizes its volume check and the dashboard its shopping list from. The
+	// other 20 overstate capital, which inflates nothing: logged, not vetoed.
+	sizeConsistencyTolerance = 0.10
 )
 
 // vet applies the ship-time rules a strategy must pass to enter the book.
@@ -56,9 +69,12 @@ const (
 //  1. dedup — the live book already trades this item under this archetype;
 //  2. kill pre-breach — the stop is already crossed at ship time (the
 //     Dragon-dart failure: entry 1180, kill 1050, market already at 1028);
-//  3. capital + floor — each strategy independently fits the research
-//     budget (a per-opportunity sizing scale, NOT a shared pool the book
-//     drains) and clears its lane's absolute-gp floor;
+//  3. capital + size + floor — each strategy independently fits the
+//     research budget (a per-opportunity sizing scale, NOT a shared pool
+//     the book drains), its units_used x entry_price overstates neither its
+//     capital_required nor the budget (both describe one batch; checked
+//     before the snapshot, being pure arithmetic), and it clears its
+//     lane's absolute-gp floor;
 //  4. EV sanity (F/B) — the claimed per-cycle gp must be within
 //     evSanityFactor of a live recomputation from the current margin and
 //     fillable size. Projections are the denominator of every scoreboard
@@ -219,6 +235,14 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 		if reason := comboFloorVeto(st); reason != "" {
 			return reason, nil
 		}
+	}
+
+	// pure arithmetic: before the price snapshot, like the other cheap rules
+	if reason := sizeConsistencyVeto(st, p.CapitalGp); reason != "" {
+		return reason, nil
+	}
+	if note := sizeOverstatedCapital(st); note != "" {
+		log.Printf("vet %s: %s", st.ID, note)
 	}
 
 	var snap *eval.Snap
@@ -533,4 +557,42 @@ func stopCrossed(st store.SidecarStrategy, ref int64) bool {
 		return ref >= *st.KillPrice
 	}
 	return ref <= *st.KillPrice
+}
+
+// sizeConsistencyVeto rejects a strategy whose units_used is bigger than the
+// batch its money is priced on. units_used x entry_price may not exceed the
+// research budget by more than sizeConsistencyTolerance, whatever
+// capital_required claims (a capital of 0 dodges nothing), and capital may
+// sit at most that far below it (the DIRECTIVE's "capital within 10% of
+// units x entry"). Missing units or entry price are left to the other rules;
+// an overstated capital is sizeOverstatedCapital's to log.
+func sizeConsistencyVeto(st store.SidecarStrategy, budget int64) string {
+	if st.Size.UnitsUsed <= 0 || st.EntryPrice <= 0 {
+		return ""
+	}
+	implied := float64(st.Size.UnitsUsed) * float64(st.EntryPrice)
+	if budget > 0 && implied > float64(budget)*(1+sizeConsistencyTolerance) {
+		return fmt.Sprintf("vetoed at ship time: units_used %d x entry_price %d = %.0f gp, over the %d research budget (units_used is also bounded by floor(budget / entry_price))",
+			st.Size.UnitsUsed, st.EntryPrice, implied, budget)
+	}
+	if st.CapitalRequired > 0 && float64(st.CapitalRequired) < implied*(1-sizeConsistencyTolerance) {
+		return fmt.Sprintf("vetoed at ship time: size fields disagree: units_used %d x entry_price %d = %.0f gp, but capital_required is %d (capital must be within %.0f%% of units x entry: price capital and units_used on the same batch)",
+			st.Size.UnitsUsed, st.EntryPrice, implied, st.CapitalRequired, sizeConsistencyTolerance*100)
+	}
+	return ""
+}
+
+// sizeOverstatedCapital reports (for the log) a capital_required more than
+// sizeConsistencyTolerance above units_used x entry_price. It inflates no
+// projection and sizes nothing downstream, so it is not a veto.
+func sizeOverstatedCapital(st store.SidecarStrategy) string {
+	if st.Size.UnitsUsed <= 0 || st.EntryPrice <= 0 || st.CapitalRequired <= 0 {
+		return ""
+	}
+	implied := float64(st.Size.UnitsUsed) * float64(st.EntryPrice)
+	if float64(st.CapitalRequired) <= implied*(1+sizeConsistencyTolerance) {
+		return ""
+	}
+	return fmt.Sprintf("capital_required %d is %.2fx units_used %d x entry_price %d (overstated capital, not vetoed)",
+		st.CapitalRequired, float64(st.CapitalRequired)/implied, st.Size.UnitsUsed, st.EntryPrice)
 }
