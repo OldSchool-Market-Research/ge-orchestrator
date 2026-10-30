@@ -47,6 +47,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/signals", s.listSignals)
 	mux.HandleFunc("GET /api/trends", s.listTrends)
 	mux.HandleFunc("GET /api/calibration", s.calibration)
+	mux.HandleFunc("GET /api/allocation", s.allocation)
+	mux.HandleFunc("GET /api/regime", s.regime)
 	mux.HandleFunc("GET /api/items", s.listItems)
 	mux.HandleFunc("GET /api/items/{id}", s.getItem)
 	mux.HandleFunc("GET /api/items/{id}/history", s.itemHistory)
@@ -60,6 +62,53 @@ func (s *Server) Handler() http.Handler {
 // calibration serves the learning chart (docs/FEEDBACK-LOOP.md §4): the
 // latest factors per archetype, their history, and the failure-mode digest
 // over the same trailing window. ?days bounds the history (default 30).
+// daysParam reads the optional ?days= window, writing the 400 itself when bad.
+func daysParam(w http.ResponseWriter, r *http.Request, def int) (int, bool) {
+	d := r.URL.Query().Get("days")
+	if d == "" {
+		return def, true
+	}
+	n, err := strconv.Atoi(d)
+	if err != nil || n < 1 || n > 365 {
+		writeErr(w, 400, "days must be 1..365")
+		return 0, false
+	}
+	return n, true
+}
+
+// allocation serves the lane allocation in log mode: the latest row with its
+// yields, and the weights over time. Nothing reads these weights yet.
+func (s *Server) allocation(w http.ResponseWriter, r *http.Request) {
+	days, ok := daysParam(w, r, 14)
+	if !ok {
+		return
+	}
+	latest, err := s.Store.LatestAllocation(r.Context())
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	history, err := s.Store.AllocationHistory(r.Context(), days)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"latest": latest, "history": history})
+}
+
+func (s *Server) regime(w http.ResponseWriter, r *http.Request) {
+	days, ok := daysParam(w, r, 14)
+	if !ok {
+		return
+	}
+	history, err := s.Store.RegimeHistory(r.Context(), days)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, history)
+}
+
 func (s *Server) calibration(w http.ResponseWriter, r *http.Request) {
 	days := 30
 	if d := r.URL.Query().Get("days"); d != "" {
@@ -629,9 +678,9 @@ func (s *Server) listSignals(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listTrends(w http.ResponseWriter, r *http.Request) {
 	lens := r.URL.Query().Get("lens")
 	switch lens {
-	case "seasonal", "volume", "band", "flip", "vflip", "hvflip", "combo":
+	case "seasonal", "volume", "volume_how", "band", "flip", "vflip", "hvflip", "combo":
 	default:
-		writeErr(w, 400, "lens must be seasonal, volume, band, flip, vflip, hvflip or combo")
+		writeErr(w, 400, "lens must be seasonal, volume, volume_how, band, flip, vflip, hvflip or combo")
 		return
 	}
 	list, err := s.Store.LatestTrends(r.Context(), lens, 25)

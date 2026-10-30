@@ -105,6 +105,14 @@ func (c *Config) defaults() {
 	}
 }
 
+// Ship floors, for the regime snapshot's counts (runner/vet.go; runner imports
+// brief and main wires this package, so the numbers are duplicated like the
+// other floor copies).
+const (
+	regimeFlipFloorGp  = 400_000
+	regimeComboFloorGp = 200_000
+)
+
 type Collector struct {
 	Store *store.Store
 	Cfg   Config
@@ -117,8 +125,9 @@ func (c *Collector) Cycle(ctx context.Context) int {
 	asOf := time.Now().UTC()
 	newSignals := 0
 	newSignals += c.sweepVolume(ctx, asOf)
-	newSignals += c.sweepSeasonal(ctx, asOf) // snapshots only — timing evidence, no signals
-	newSignals += c.sweepBand(ctx, asOf)     // snapshots only — qualification evidence, no signals
+	newSignals += c.sweepSeasonal(ctx, asOf)  // snapshots only — timing evidence, no signals
+	newSignals += c.sweepVolumeHow(ctx, asOf) // snapshots only — V evidence, no signals
+	newSignals += c.sweepBand(ctx, asOf)      // snapshots only — qualification evidence, no signals
 	newSignals += c.sweepFlip(ctx, asOf)
 	newSignals += c.sweepHighValue(ctx, asOf)
 	newSignals += c.sweepCombo(ctx, asOf)
@@ -128,6 +137,7 @@ func (c *Collector) Cycle(ctx context.Context) int {
 	} else if n > 0 {
 		log.Printf("collect: expired %d stale signal(s)", n)
 	}
+	c.logRecord(ctx, asOf)
 	return newSignals
 }
 
@@ -206,6 +216,123 @@ func (c *Collector) sweepVolume(ctx context.Context, asOf time.Time) int {
 	return persist(c, ctx, asOf, "volume", parsed, func(r volRow) (int, string, bool) {
 		return r.ItemID, r.Name, r.Z >= c.Cfg.VolZMin || r.Z <= -c.Cfg.VolZMin
 	})
+}
+
+// --- same-hour-of-week volume lens: whole market ---
+// (Same computation as ge-mcp volume_zscore baseline=same_how, with its default
+// gates.) The scan reads every compressed chunk, ~65s: it took 45% of the
+// agent's tool time before it moved here, and ran past the CLI's per-call limit.
+
+const volumeHowSweepSQL = `
+WITH cur AS (
+  SELECT item_id,
+         sum(coalesce(high_volume,0)+coalesce(low_volume,0)) AS cur_vol,
+         sum(coalesce(high_volume,0)) AS buys,
+         sum(coalesce(low_volume,0)) AS sells
+  FROM prices_5m WHERE ts >= now() - interval '1 hour'
+  GROUP BY 1
+),
+hist AS (
+  SELECT item_id, date_trunc('hour', ts) AS hb,
+         sum(coalesce(high_volume,0)+coalesce(low_volume,0)) AS vol
+  FROM prices_5m
+  WHERE ts < date_trunc('hour', now())
+    AND (extract(dow from ts AT TIME ZONE 'utc')*24 + extract(hour from ts AT TIME ZONE 'utc'))::int
+      = (extract(dow from now() AT TIME ZONE 'utc')*24 + extract(hour from now() AT TIME ZONE 'utc'))::int
+  GROUP BY 1, 2
+),
+base AS (
+  SELECT item_id, avg(vol) AS mean, stddev_samp(vol) AS sd, count(*) AS n
+  FROM hist GROUP BY 1
+),
+px AS (
+  SELECT item_id,
+         (array_agg((coalesce(avg_high_price,avg_low_price)+coalesce(avg_low_price,avg_high_price))/2.0 ORDER BY ts ASC))[1]  AS p_start,
+         (array_agg((coalesce(avg_high_price,avg_low_price)+coalesce(avg_low_price,avg_high_price))/2.0 ORDER BY ts DESC))[1] AS p_end
+  FROM prices_5m
+  WHERE ts >= now() - interval '1 hour' AND (avg_high_price IS NOT NULL OR avg_low_price IS NOT NULL)
+  GROUP BY 1
+)
+SELECT c.item_id, i.name, c.cur_vol, round(b.mean)::bigint, c.buys, c.sells,
+       round(((c.cur_vol - b.mean) / b.sd)::numeric, 2)::float8 AS z,
+       b.n,
+       round((100*(p.p_end - p.p_start)/nullif(p.p_start,0))::numeric, 2)::float8 AS price_move_pct,
+       round(p.p_end)::bigint AS cur_price
+FROM cur c
+JOIN base b USING (item_id)
+JOIN items i USING (item_id)
+LEFT JOIN px p USING (item_id)
+WHERE b.sd > 0 AND b.n >= 3 AND c.cur_vol >= 100
+ORDER BY abs((c.cur_vol - b.mean) / b.sd) DESC
+LIMIT $1`
+
+func (c *Collector) sweepVolumeHow(ctx context.Context, asOf time.Time) int {
+	// Full-history scan: run uncapped, like the seasonal sweep.
+	tx, err := c.Store.Pool.Begin(ctx)
+	if err != nil {
+		log.Printf("collect: volume_how begin: %v", err)
+		return 0
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = 0"); err != nil {
+		log.Printf("collect: volume_how timeout off: %v", err)
+		return 0
+	}
+	rows, err := tx.Query(ctx, volumeHowSweepSQL, c.Cfg.SnapshotTopN)
+	if err != nil {
+		log.Printf("collect: volume_how sweep: %v", err)
+		return 0
+	}
+	type volHowRow struct {
+		ItemID       int      `json:"item_id"`
+		Name         string   `json:"name"`
+		CurVol       int64    `json:"cur_vol"`
+		BaselineMean int64    `json:"baseline_mean"`
+		Buys         int64    `json:"buys"`
+		Sells        int64    `json:"sells"`
+		Z            float64  `json:"z"`
+		NBaseline    int64    `json:"n_baseline"`
+		PriceMovePct *float64 `json:"price_move_pct"`
+		CurPrice     *int64   `json:"cur_price"`
+	}
+	var parsed []volHowRow
+	for rows.Next() {
+		var r volHowRow
+		if err := rows.Scan(&r.ItemID, &r.Name, &r.CurVol, &r.BaselineMean, &r.Buys, &r.Sells,
+			&r.Z, &r.NBaseline, &r.PriceMovePct, &r.CurPrice); err != nil {
+			rows.Close()
+			log.Printf("collect: volume_how scan: %v", err)
+			return 0
+		}
+		parsed = append(parsed, r)
+	}
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("collect: volume_how commit: %v", err)
+		return 0
+	}
+	// Evidence for the V lane, read from the brief. Signals stay on the trailing
+	// lens, whose baseline has ~168 samples to this one's ~17.
+	return persist(c, ctx, asOf, "volume_how", parsed, func(r volHowRow) (int, string, bool) {
+		return r.ItemID, r.Name, false
+	})
+}
+
+// logRecord appends this sweep's regime snapshot and the lane allocation.
+// Neither reaches a run yet, so a failure is only logged.
+func (c *Collector) logRecord(ctx context.Context, asOf time.Time) {
+	if _, err := c.Store.RecordRegime(ctx, asOf, regimeFlipFloorGp, regimeComboFloorGp, c.Cfg.VolZMin); err != nil {
+		log.Printf("collect: regime: %v", err)
+	}
+	if c.Cfg.LaneWeights == nil {
+		return
+	}
+	a, err := c.Store.CompileAllocation(ctx, c.Cfg.LaneWeights)
+	if err != nil {
+		log.Printf("collect: allocation: %v", err)
+		return
+	}
+	log.Printf("collect: allocation (log only, not applied): weights %v", a.Weights)
 }
 
 // --- seasonal lens: hour-of-week amplitude, whole market ---
@@ -660,10 +787,10 @@ func (c *Collector) sweepWatch(ctx context.Context) int {
 // significant). Returns the count of NEW signals.
 func persist[T any](c *Collector, ctx context.Context, asOf time.Time, lens string, rows []T, flag func(T) (int, string, bool)) int {
 	trend := make([]store.TrendRow, 0, len(rows))
-	for _, r := range rows {
+	for i, r := range rows {
 		id, _, _ := flag(r)
 		m, _ := json.Marshal(r)
-		trend = append(trend, store.TrendRow{AsOf: asOf, Lens: lens, ItemID: id, Metrics: m})
+		trend = append(trend, store.TrendRow{AsOf: asOf, Lens: lens, ItemID: id, Rank: i + 1, Metrics: m})
 	}
 	if err := c.Store.InsertTrendSnapshots(ctx, asOf, lens, trend); err != nil {
 		log.Printf("collect: %s snapshots: %v", lens, err)

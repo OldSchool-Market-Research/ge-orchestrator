@@ -139,3 +139,22 @@ func TestGroupNegative(t *testing.T) {
 		}
 	}
 }
+
+func TestHasPrecomputedScans(t *testing.T) {
+	both := "### Latest market sweep\n- " + sweepTitleVolumeHow + " (as of 10-30 12:00):\n  - {}\n- " + sweepTitleSeasonal + " (as of 10-30 12:00):\n  - {}\n"
+	if !HasPrecomputedScans(both) {
+		t.Error("both lenses rendered")
+	}
+	if HasPrecomputedScans("### Latest market sweep\n- " + sweepTitleSeasonal + ":\n") {
+		t.Error("a missing lens means the agent keeps its tool")
+	}
+	if HasPrecomputedScans("") {
+		t.Error("no sweep at all")
+	}
+	// ge-agent's refusal quotes these words; moving them breaks its pointer.
+	for _, quoted := range []string{"volume anomalies vs the same hour of the week", "hour-of-week amplitude"} {
+		if !strings.Contains(both, quoted) {
+			t.Errorf("title lost %q", quoted)
+		}
+	}
+}
