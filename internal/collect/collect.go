@@ -620,7 +620,7 @@ func (c *Collector) sweepHighValue(ctx context.Context, asOf time.Time) int {
 		High            int64  `json:"high"`
 		Low             int64  `json:"low"`
 		Margin          int64  `json:"margin"`
-		BuyLimit        int64  `json:"buy_limit"`
+		BuyLimit        *int64 `json:"buy_limit"` // nil: unknown; the sweep sizes it as one unit
 		UnitsAffordable int64  `json:"units_affordable"`
 		GpCycle         int64  `json:"gp_cycle"`
 		HighAgeS        int    `json:"high_age_s"`
