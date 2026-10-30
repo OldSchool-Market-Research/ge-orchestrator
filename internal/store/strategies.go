@@ -109,6 +109,7 @@ type SidecarStrategy struct {
 	Direction       *string     `json:"direction,omitempty"`
 	Legs            []Leg       `json:"legs,omitempty"`
 	RelationID      *int        `json:"relation_id,omitempty"`
+	RecipeID        *int        `json:"recipe_id,omitempty"` // P: the process_recipes row
 	Event           *Event      `json:"event,omitempty"`
 	EvalWindowHours *int        `json:"eval_window_hours,omitempty"`
 
@@ -227,10 +228,10 @@ func insertStrategy(ctx context.Context, tx pgx.Tx, runID int64, openedAt time.T
 		 confidence, confidence_why, evidence, invalidation, risks, paper_trade,
 		 state, state_reason, opened_at, closed_at,
 		 buy_window, sell_window, trigger, direction, legs, relation_id, event,
-		 attention_spec, eval_epoch, source_signal_id, source_lens, screen_hits)
+		 attention_spec, eval_epoch, source_signal_id, source_lens, screen_hits, recipe_id)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
 		        make_interval(hours => $15),$16,$17,$18,$19,$20,$21,$22,
-		        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44)`,
+		        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45)`,
 		runID, st.ID, st.Archetype, st.Title, st.Thesis, items, st.PrimaryItemID(),
 		st.Entry, st.Exit, st.EntryPrice, st.ExitPrice, st.KillPrice, st.Horizon, nullIfEmpty(st.Attention),
 		evalWindowHours(st), st.CapitalRequired, st.Size.UnitsUsed,
@@ -246,7 +247,7 @@ func insertStrategy(ctx context.Context, tx pgx.Tx, runID int64, openedAt time.T
 		marshalOrNil(st.Event, st.Event != nil),
 		marshalOrNil(st.AttentionSpec, st.AttentionSpec != nil),
 		epoch,
-		st.SourceSignalID, nullIfEmpty(st.SourceLens), st.ScreenHits,
+		st.SourceSignalID, nullIfEmpty(st.SourceLens), st.ScreenHits, st.RecipeID,
 	); err != nil {
 		return fmt.Errorf("insert strategy %s: %w", st.ID, err)
 	}
@@ -321,6 +322,7 @@ type Strategy struct {
 	Direction   *string       `json:"direction,omitempty"`
 	Legs        []Leg         `json:"legs,omitempty"`
 	RelationID  *int          `json:"relation_id,omitempty"`
+	RecipeID    *int          `json:"recipe_id,omitempty"`
 	Event       *Event        `json:"event,omitempty"`
 	TriggeredAt *time.Time    `json:"triggered_at,omitempty"`
 }
@@ -333,7 +335,7 @@ const strategyCols = `strategy_id, run_id, sid, archetype, title, thesis, items,
 	extract(epoch from eval_window)::float8,
 	buy_window, sell_window, trigger, direction, legs, relation_id, event, triggered_at,
 	projected_per_1h_gp, attention_spec, failure_mode, eval_epoch,
-	source_signal_id, source_lens, screen_hits`
+	source_signal_id, source_lens, screen_hits, recipe_id`
 
 func scanStrategy(row pgx.Row) (*Strategy, error) {
 	var st Strategy
@@ -346,7 +348,7 @@ func scanStrategy(row pgx.Row) (*Strategy, error) {
 		&st.State, &st.StateReason, &st.OpenedAt, &st.ClosedAt,
 		&st.EvalWindowS, &buyW, &sellW, &trig, &st.Direction, &legs, &st.RelationID, &event, &st.TriggeredAt,
 		&st.ProjectedPer1hGp, &attnSpec, &st.FailureMode, &st.EvalEpoch,
-		&st.SourceSignalID, &st.SourceLens, &st.ScreenHits)
+		&st.SourceSignalID, &st.SourceLens, &st.ScreenHits, &st.RecipeID)
 	if err != nil {
 		return nil, err
 	}

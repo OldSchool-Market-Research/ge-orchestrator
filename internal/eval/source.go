@@ -34,6 +34,8 @@ type WindowStats struct {
 type PriceSource interface {
 	Snapshot(ctx context.Context, itemID int) (*Snap, error)
 	SnapshotMany(ctx context.Context, itemIDs []int) (map[int]*Snap, error)
+	// ProcessSnapshot reads one processing recipe; ErrRecipeNotFound if it doesn't exist.
+	ProcessSnapshot(ctx context.Context, recipeID int) (*ProcessSnap, error)
 	// WindowStats aggregates prices_5m rows since `since` whose hour-of-week
 	// bucket falls inside w.
 	WindowStats(ctx context.Context, itemID int, since time.Time, w Window) (WindowStats, error)

@@ -74,3 +74,19 @@ func TestAttribute(t *testing.T) {
 		})
 	}
 }
+
+func TestAttributeProcessRecipe(t *testing.T) {
+	recipe := func(id int) *int { return &id }
+	st := provStrategy("P-red-leather-20261030", "P", 2507)
+	st.RecipeID = recipe(16)
+	assigned := []Signal{{SignalID: 7, Kind: "process", ItemID: 9999, Metrics: json.RawMessage(`{"recipe_id":16}`)}}
+	if got, lens := attribute(st, assigned, nil, nil); got == nil || *got != 7 || lens != "process" {
+		t.Errorf("a signal for the same recipe: %v %q", got, lens)
+	}
+	if _, lens := attribute(st, nil, nil, []string{"process"}); lens != "sweep:process" {
+		t.Errorf("the brief's P rows: %q", lens)
+	}
+	if _, lens := attribute(st, nil, nil, []string{"combo"}); lens != "free" {
+		t.Errorf("another lane's rows: %q", lens)
+	}
+}

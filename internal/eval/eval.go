@@ -54,6 +54,10 @@ type Policy struct {
 	ConfirmHealthy  float64
 	ConfirmRatioMin float64
 	MinTickGap      time.Duration
+	// ConfirmMinPer1hGp, when set, is a realized pace a confirm must also reach. A
+	// 250k recipe confirming at half its projection would otherwise confirm under the
+	// lane's own floor.
+	ConfirmMinPer1hGp int64
 }
 
 func policyFor(archetype string) Policy {
@@ -64,6 +68,9 @@ func policyFor(archetype string) Policy {
 		// Intraday cycles: evaluate every ~15m; three consecutive floor
 		// breaches (~45m of collapsed spread) kills.
 		return Policy{KillConsecutive: 3, ConfirmHealthy: confirmHealthyPct, ConfirmRatioMin: confirmRatioMin, MinTickGap: 15 * time.Minute}
+	case "P":
+		// A market a player is working live: same pace as F.
+		return Policy{KillConsecutive: 3, ConfirmHealthy: confirmHealthyPct, ConfirmRatioMin: confirmRatioMin, MinTickGap: 15 * time.Minute, ConfirmMinPer1hGp: FloorPGpHr}
 	case "B":
 		// Day-scale holds: hourly cadence, slower kill like H.
 		return Policy{KillConsecutive: 6, ConfirmHealthy: confirmHealthyPct, ConfirmRatioMin: confirmRatioMin, MinTickGap: time.Hour}
@@ -200,6 +207,8 @@ func (ev *Evaluator) Compute(ctx context.Context, st store.Strategy) (store.Eval
 		return ev.computeVolume(ctx, st)
 	case "C":
 		return ev.computeCombo(ctx, st)
+	case "P":
+		return ev.computeProcess(ctx, st)
 	case "U":
 		return ev.computeUpdate(ctx, st)
 	case "H":
@@ -281,22 +290,23 @@ func (ev *Evaluator) transition(ctx context.Context, st store.Strategy, now time
 		// the factor is 1 and this is exactly the old rule.
 		factor := ev.calFactor(ctx, st.Archetype)
 		bar := pol.ConfirmRatioMin * factor
+		// Realized pace = confirm ratio x the same denominator the ratio was
+		// measured against (harness projection when set).
+		den := int64(0)
+		if st.ProjectedPer1hGp != nil {
+			den = *st.ProjectedPer1hGp
+		} else if st.Per1hGp != nil {
+			den = *st.Per1hGp
+		}
+		paceOK := pol.ConfirmMinPer1hGp == 0 || (ratio != nil && int64(*ratio*float64(den)) >= pol.ConfirmMinPer1hGp)
 		if total > 0 && float64(healthy)/float64(total) >= pol.ConfirmHealthy &&
-			ratio != nil && *ratio >= bar {
+			ratio != nil && *ratio >= bar && paceOK {
 			reason := sprintf("window %s: %d/%d healthy, median realized/projected %.2f >= calibrated bar %.2f (%.2f x factor %.2f, haircut)",
 				window, healthy, total, *ratio, bar, pol.ConfirmRatioMin, factor)
 			if err := ev.closeAndScore(ctx, st, "confirmed", reason); err != nil {
 				return err
 			}
 			if ev.Notify != nil {
-				// Realized pace = confirm ratio x the same denominator the
-				// ratio was measured against (harness projection when set).
-				den := int64(0)
-				if st.ProjectedPer1hGp != nil {
-					den = *st.ProjectedPer1hGp
-				} else if st.Per1hGp != nil {
-					den = *st.Per1hGp
-				}
 				ev.Notify.StrategyConfirmed(ctx, st, int64(*ratio*float64(den)))
 			}
 			return nil
@@ -304,6 +314,9 @@ func (ev *Evaluator) transition(ctx context.Context, st store.Strategy, now time
 		r := sprintf("window %s elapsed without meeting confirmation", window)
 		if ratio != nil {
 			r += sprintf(" (%d/%d healthy, ratio %.2f vs calibrated bar %.2f)", healthy, total, *ratio, bar)
+			if !paceOK {
+				r += sprintf(", %d gp/hr realized vs %d needed", int64(*ratio*float64(den)), pol.ConfirmMinPer1hGp)
+			}
 		}
 		return ev.closeAndScore(ctx, st, "expired", r)
 	}

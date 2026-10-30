@@ -78,6 +78,11 @@ func (ev *Evaluator) failureMode(ctx context.Context, st store.Strategy, state s
 // returned — the close already happened and must not be retried as if it
 // hadn't (same contract as watchlist scoring).
 func (ev *Evaluator) recalibrate(ctx context.Context, archetype string) {
+	// P's realized is a pace per hour of play, so a factor would mean nothing, and
+	// its 0.15 default would collapse the confirm bar and shrink claims in the brief.
+	if archetype == "P" {
+		return
+	}
 	keys := []string{archetype}
 	if archetype == "C" {
 		for _, kind := range store.RelationKinds {

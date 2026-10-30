@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -296,6 +297,10 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 		log.Printf("vet %s: %s", st.ID, note)
 	}
 
+	if st.Archetype == "P" {
+		return r.vetProcess(ctx, st)
+	}
+
 	var snap *eval.Snap
 	if r.Prices != nil {
 		if snap, err = r.Prices.Snapshot(ctx, itemID); err != nil {
@@ -387,6 +392,84 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 	return "", proj
 }
 
+// processMinHours and processMinAtFloor are lane P's persistence gate: at least 12
+// hourly snapshots in the last 24h, at least 80% of them at the floor. The view's
+// gp_hr can be one good hour, and it's an upper bound on the honest number, so merely
+// positive would let a spike through; ge-data snapshots every recipe hourly.
+const (
+	processMinHours   = 12
+	processMinAtFloor = 0.8
+)
+
+// vetProcess applies lane P's ship-time rules and returns the harness projection.
+// A lookup failure fails open like the other record-fed rules, but a recipe that
+// doesn't exist is an answer: it can't be paper-traded.
+func (r *Runner) vetProcess(ctx context.Context, st store.SidecarStrategy) (string, *int64) {
+	if st.RecipeID == nil {
+		return "vetoed at ship time: P strategy cites no recipe_id", nil
+	}
+	if r.Prices == nil {
+		return "", nil
+	}
+	snap, err := r.Prices.ProcessSnapshot(ctx, *st.RecipeID)
+	if errors.Is(err, eval.ErrRecipeNotFound) {
+		return fmt.Sprintf("vetoed at ship time: recipe_id %d not found in process_recipes", *st.RecipeID), nil
+	}
+	if err != nil {
+		log.Printf("vet %s: recipe %d: %v", st.ID, *st.RecipeID, err)
+		return "", nil
+	}
+	proj := eval.ProjectProcessPer1h(snap, st.Size.UnitsUsed)
+	if reason := processVeto(snap, proj); reason != "" {
+		return reason, nil
+	}
+	// The dedup, the graveyard, the board and the pings all key on items[0]. A recipe's
+	// first leg can be a shared input like a nature rune, which would falsely veto
+	// every other recipe using it.
+	if snap.OutputItem != nil && st.PrimaryItemID() != *snap.OutputItem {
+		return fmt.Sprintf("vetoed at ship time: items[0] must be recipe %d's main output, item %d (process_quote: meta.harness.output_item)",
+			*st.RecipeID, *snap.OutputItem), nil
+	}
+	atFloor, total, err := r.Store.ProcessPersistence(ctx, *st.RecipeID, eval.FloorPGpHr)
+	if err != nil {
+		log.Printf("vet %s: recipe %d persistence: %v", st.ID, *st.RecipeID, err)
+	} else if reason := processPersistenceVeto(atFloor, total); reason != "" {
+		return reason, nil
+	}
+	return "", proj
+}
+
+// processVeto holds a recipe to what can be paper-traded and the lane's floor on the
+// harness's own number, not the claim. ge-mcp process_quote reports the same test as
+// shippable, so the agent can run it before pitching.
+func processVeto(s *eval.ProcessSnap, proj *int64) string {
+	switch {
+	case s.Linked:
+		return "vetoed at ship time: this recipe is a C relation: ship it through lane C with combo_quote"
+	case s.Throughput == "unknown":
+		return "vetoed at ship time: this recipe has no known rate, so the harness can't size it"
+	case s.UnknownLimitLegs > 0:
+		return "vetoed at ship time: a leg of this recipe has no known buy limit"
+	case s.Stale():
+		return "vetoed at ship time: a leg of this recipe hasn't traded in over 6h, so its price can't be trusted"
+	case proj == nil:
+		return "vetoed at ship time: this recipe doesn't earn at the harness's prices, or a leg has no price right now"
+	case *proj < eval.FloorPGpHr:
+		return fmt.Sprintf("vetoed at ship time: harness projection %d gp/hr is below the %d lane-P floor (process_quote: meta.harness)", *proj, eval.FloorPGpHr)
+	}
+	return ""
+}
+
+func processPersistenceVeto(atFloor, total int) string {
+	if total < processMinHours {
+		return fmt.Sprintf("vetoed at ship time: only %d hourly snapshots in the last 24h, under the %d the lane-P gate needs", total, processMinHours)
+	}
+	if float64(atFloor) < processMinAtFloor*float64(total) {
+		return fmt.Sprintf("vetoed at ship time: read at the floor in only %d of the last %d hourly snapshots, under the lane-P gate of %.0f%%", atFloor, total, 100*processMinAtFloor)
+	}
+	return ""
+}
+
 // graveEntry looks up the graveyard row for an item×archetype, nil-safe.
 func (rec *record) graveEntry(itemID int, archetype string) (store.GraveyardRow, bool) {
 	if rec == nil || rec.grave == nil {
@@ -402,6 +485,10 @@ func (rec *record) graveEntry(itemID int, archetype string) (store.GraveyardRow,
 func graveyardVeto(g store.GraveyardRow, cooldown time.Duration, now time.Time) string {
 	if cooldown <= 0 || now.Sub(g.LastKilledAt) >= cooldown {
 		return ""
+	}
+	if g.Archetype == "P" { // realized is a pace there, not gp
+		return fmt.Sprintf("vetoed at ship time: item %d [P] is graveyarded — %d kills in the trailing %dd, last killed %s (cooldown %s; a materially new signal class means a different archetype)",
+			g.ItemID, g.Kills, store.GraveyardWindowDays, g.LastKilledAt.Format("2006-01-02"), cooldown)
 	}
 	return fmt.Sprintf("vetoed at ship time: item %d [%s] is graveyarded — %d kills, %d gp realized in the trailing %dd, last killed %s (cooldown %s; a materially new signal class means a different archetype)",
 		g.ItemID, g.Archetype, g.Kills, g.EstRealizedGp, store.GraveyardWindowDays,

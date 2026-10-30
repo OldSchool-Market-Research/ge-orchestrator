@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -16,6 +17,12 @@ type fakeSource struct {
 	z       float64
 	zN      int
 	zMove   *float64
+	process *ProcessSnap
+	procErr error
+}
+
+func (f *fakeSource) ProcessSnapshot(_ context.Context, _ int) (*ProcessSnap, error) {
+	return f.process, f.procErr
 }
 
 func (f *fakeSource) Snapshot(_ context.Context, id int) (*Snap, error) { return f.snaps[id], nil }
@@ -580,5 +587,126 @@ func TestRecipeMargin(t *testing.T) {
 	}
 	if _, ok := RecipeMargin(in, out, map[int]*Snap{139: {Low: i64(6900)}, 2434: {}}); ok {
 		t.Error("nulls are signal: an unpriced leg has no margin")
+	}
+}
+
+func processStrategy(units int64) store.Strategy {
+	id := 16
+	return store.Strategy{StrategyID: 9, Sid: "P-x", Archetype: "P", RecipeID: &id, UnitsUsed: &units,
+		OpenedAt: tue1200.Add(-time.Hour), State: "open", EvalWindow: 48 * time.Hour}
+}
+
+func pSnap(margin, in, out, player, limit, market float64) *ProcessSnap {
+	return &ProcessSnap{MarginSlow: &margin, GrossIn: &in, GrossOut: &out, ActionsPerHour: &player, LimitRate: &limit, MarketRate: &market, Throughput: "fixed"}
+}
+
+func TestProcessHonestCapsLikeEveryOtherLane(t *testing.T) {
+	ev := &Evaluator{}
+	// Slippage: 0.5% of 3000 is 15. 15% of the market is 889.5, the limit is 550.
+	margin, rate, gp, ok := ev.processHonest(pSnap(900, 1000, 2000, 1600, 550, 5930), 0)
+	if !ok || margin != 885 || rate != 550 || gp != 885*550 {
+		t.Errorf("margin %v rate %v gp %v ok %v", margin, rate, gp, ok)
+	}
+	// 15% of the market binds a recipe the view credits with all of it.
+	if _, rate, _, _ := ev.processHonest(pSnap(300_000, 1, 1, 10, 313, 10), 0); rate != 1.5 {
+		t.Errorf("market cap: %v", rate)
+	}
+	// The strategy's size binds: 3 per 4h is 0.75 an hour.
+	if _, rate, _, _ := ev.processHonest(pSnap(300_000, 1, 1, 10, 313, 10), 3); rate != 0.75 {
+		t.Errorf("size cap: %v", rate)
+	}
+	// A volume-bound recipe has no player speed.
+	s := pSnap(900, 1000, 2000, 1, 3000, 1000)
+	s.ActionsPerHour = nil
+	if _, rate, _, _ := ev.processHonest(s, 0); rate != 150 {
+		t.Errorf("no player speed: %v", rate)
+	}
+	// Nulls are signal: an unpriced recipe has no number, not zero.
+	s = pSnap(900, 1000, 2000, 1600, 550, 5930)
+	s.MarginSlow = nil
+	if _, _, _, ok := ev.processHonest(s, 0); ok {
+		t.Error("no margin must not be ok")
+	}
+	if p := ProjectProcessPer1h(s, 0); p != nil {
+		t.Errorf("projection on an unpriced recipe: %d", *p)
+	}
+	if p := ProjectProcessPer1h(pSnap(10, 1000, 2000, 1600, 550, 5930), 0); p != nil {
+		t.Errorf("a margin gone after slippage projects nothing: %d", *p)
+	}
+	if p := ProjectProcessPer1h(pSnap(900, 1000, 2000, 1600, 550, 5930), 0); p == nil || *p != 885*550 {
+		t.Errorf("projection %v", p)
+	}
+}
+
+func TestComputeProcess(t *testing.T) {
+	run := func(s *ProcessSnap) (store.Evaluation, map[string]bool) {
+		t.Helper()
+		e, checks, err := fixedEvaluator(&fakeSource{process: s}, tue1200).computeProcess(context.Background(), processStrategy(2200))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e, checks
+	}
+	e, _ := run(pSnap(900, 1000, 2000, 1600, 550, 5930))
+	if e.Verdict != "healthy" || e.RealizedPer1hGp == nil || *e.RealizedPer1hGp != 885*550 {
+		t.Errorf("healthy recipe: %s %v", e.Verdict, e.RealizedPer1hGp)
+	}
+	// Half the floor is 125k: 230 x 550 = 126,500 survives, 220 x 550 = 121,000 doesn't.
+	if e, _ := run(pSnap(245, 1000, 2000, 1600, 550, 5930)); e.Verdict != "healthy" {
+		t.Errorf("above half the floor: %s", e.Verdict)
+	}
+	if e, checks := run(pSnap(235, 1000, 2000, 1600, 550, 5930)); e.Verdict != "kill_signal" || checks["floor_ok"] {
+		t.Errorf("below half the floor: %s %v", e.Verdict, checks)
+	}
+	// An unpriced leg degrades; it doesn't kill or fabricate a number.
+	s := pSnap(900, 1000, 2000, 1600, 550, 5930)
+	s.MarginSlow = nil
+	e, checks := run(s)
+	if e.Verdict != "degraded" || e.RealizedPer1hGp != nil || checks["legs_priced"] {
+		t.Errorf("unpriced: %s %v %v", e.Verdict, e.RealizedPer1hGp, checks)
+	}
+	// A stale leg can inflate the margin, so it neither reads healthy nor kills.
+	s = pSnap(900, 1000, 2000, 1600, 550, 5930)
+	age := int64(legFreshMaxAgeS + 1)
+	s.MaxLegAgeS = &age
+	e, checks = run(s)
+	if e.Verdict != "degraded" || e.RealizedPer1hGp != nil || e.CurMargin != nil || checks["legs_fresh"] {
+		t.Errorf("stale: %s %v %v", e.Verdict, e.RealizedPer1hGp, checks)
+	}
+	s = pSnap(10, 1000, 2000, 1600, 550, 5930)
+	s.MaxLegAgeS = &age
+	if e, checks := run(s); e.Verdict != "degraded" || !checks["floor_ok"] {
+		t.Errorf("a stale leg must not kill: %s %v", e.Verdict, checks)
+	}
+	// Live margin is stored per action, so the board reads it like any lane.
+	if e, _ := run(pSnap(900, 1000, 2000, 1600, 550, 5930)); e.CurMargin == nil || *e.CurMargin != 885 {
+		t.Errorf("cur margin: %v", e.CurMargin)
+	}
+}
+
+// A recipe the seed dropped reads as unpriced, so the window can expire the strategy.
+func TestComputeProcessMissingRecipe(t *testing.T) {
+	src := &fakeSource{procErr: ErrRecipeNotFound}
+	e, checks, err := fixedEvaluator(src, tue1200).computeProcess(context.Background(), processStrategy(2200))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Verdict != "degraded" || e.RealizedPer1hGp != nil || checks["legs_priced"] {
+		t.Errorf("%s %v %v", e.Verdict, e.RealizedPer1hGp, checks)
+	}
+	src.procErr = errors.New("db down")
+	if _, _, err := fixedEvaluator(src, tue1200).computeProcess(context.Background(), processStrategy(2200)); err == nil {
+		t.Error("a real lookup failure must stay an error, not a tick")
+	}
+}
+
+// P's realized is a pace per hour of play: no factor, and a confirm needs the floor.
+func TestProcessIsNotCalibrated(t *testing.T) {
+	(&Evaluator{}).recalibrate(context.Background(), "P") // a nil Store panics if it tries
+	if got := policyFor("P").ConfirmMinPer1hGp; got != FloorPGpHr {
+		t.Errorf("confirm bar %d", got)
+	}
+	if got := policyFor("F").ConfirmMinPer1hGp; got != 0 {
+		t.Errorf("other lanes keep their ratio alone: %d", got)
 	}
 }

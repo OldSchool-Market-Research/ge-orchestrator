@@ -289,3 +289,12 @@ func (s *Store) ProcessTop(ctx context.Context, metric string, since time.Time, 
 	}
 	return out, nil
 }
+
+// ProcessPersistence counts the trailing 24h's hourly snapshots of a recipe: how many
+// exist, and how many read at least floor. A recipe worth shipping pays most hours,
+// not one good one. A NULL gp_hr is an unpriceable hour, and counts against it.
+func (s *Store) ProcessPersistence(ctx context.Context, recipeID int, floor int64) (atFloor, total int, err error) {
+	err = s.Pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE gp_hr >= $2), count(*)
+		FROM process_snapshots WHERE recipe_id = $1 AND ts > now() - interval '24 hours'`, recipeID, floor).Scan(&atFloor, &total)
+	return atFloor, total, processErr(err)
+}
