@@ -218,9 +218,7 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 // constants can't live there and be shared). The calibration section uses
 // them to translate a factor into the raw claim it implies. C has no line here:
 // its calibrated floor is not enforced, and a raw-claim bar would throttle it by
-// instruction instead. C:combine reads pace 0 on a positive margin (a thin leg's
-// 30-minute volume can round its participation-capped conversions to 0), so its
-// 0.15 factor would imply a 1.33M bar on a kind that earned 35M in a fortnight.
+// instruction instead.
 const (
 	briefFloorFPerCycleGp = 400_000
 	briefFloorBPerCycleGp = 100_000
