@@ -4,7 +4,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"log"
 	"net/http"
@@ -41,10 +40,6 @@ func main() {
 		log.Printf("marked %d orphaned run(s) failed", n)
 	}
 
-	apiKey := os.Getenv("MINIMAX_API_KEY")
-	if apiKey == "" {
-		apiKey = keyFromDotEnv(".env", "minimax")
-	}
 	// Operator ping: fires only for ships that clear the standing
 	// "worth my time" bar. No URL = silent.
 	var notifier *notify.Notifier
@@ -70,7 +65,6 @@ func main() {
 			AgentPath: mustEnv("GE_AGENT_PATH"),
 			McpPath:   mustEnv("GE_MCP_PATH"),
 			McpDSN:    mustEnv("GE_MCP_DSN"),
-			APIKey:    apiKey,
 			Directive: mustEnv("GE_AGENT_DIRECTIVE"),
 			StateDir:  getenv("GE_ORCH_STATE", "state"),
 			ExtraEnv:  agentEnvPassthrough(),
@@ -216,7 +210,7 @@ func maybeTriggerOnSignals(ctx context.Context, st *store.Store, r *runner.Runne
 // environment to the spawned agent, except the ones the runner owns
 // (directive, brief, and the workspace-relative reports dir). Before this,
 // runner.execute's fixed five-var env made every agent tuning knob
-// (GE_AGENT_MAX_TURNS, _MAX_TOKENS, _MODEL, _RUN_TIMEOUT_S, ...)
+// (GE_AGENT_MAX_TURNS, _RUN_TIMEOUT_S, _KIMI_MODEL, ...)
 // unreachable from the deployment — frozen at compile-time defaults.
 func agentEnvPassthrough() []string {
 	owned := map[string]bool{
@@ -277,19 +271,4 @@ func durEnv(key string, def time.Duration) time.Duration {
 		log.Fatalf("%s: bad duration %q", key, v)
 	}
 	return def
-}
-
-func keyFromDotEnv(path, key string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(sc.Text()), key+"="); ok {
-			return strings.Trim(strings.TrimSpace(v), `"'`)
-		}
-	}
-	return ""
 }

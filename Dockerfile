@@ -2,7 +2,7 @@
 # it spawns, composed from their published images at PINNED tags (bump the ARGs
 # deliberately — see each repo's VERSION). DIRECTIVE.md rides in from ge-agent.
 
-ARG GE_AGENT_IMAGE=ghcr.io/oldschool-market-research/ge-agent:0.13.0
+ARG GE_AGENT_IMAGE=ghcr.io/oldschool-market-research/ge-agent:0.14.0
 ARG GE_MCP_IMAGE=ghcr.io/oldschool-market-research/ge-mcp:0.7.0
 
 FROM ${GE_AGENT_IMAGE} AS agent
@@ -18,11 +18,11 @@ RUN CGO_ENABLED=0 GOOS=linux \
     go build -trimpath -ldflags="-s -w" -o /out/ge-orchestrator .
 
 # ---- runtime ----
-# Node rather than distroless/static: ge-agent's kimi driver
-# (GE_AGENT_DRIVER=kimi) runs the Kimi Code CLI, a node app, pinned to the
-# version validated against prod briefs. Optional deps are a PTY and a
-# clipboard, neither used headless. The CLI's login, config and sessions live
-# in GE_AGENT_KIMI_HOME on the state volume, not in the image.
+# Node rather than distroless/static: ge-agent's model loop runs the Kimi
+# Code CLI, a node app, pinned to the version validated against prod briefs.
+# Optional deps are a PTY and a clipboard, neither used headless. The CLI's
+# login, config and sessions live in GE_AGENT_KIMI_HOME on the state volume,
+# not in the image.
 FROM node:22.23.3-bookworm-slim
 RUN npm install -g --omit=optional @moonshot-ai/kimi-code@2.3.1 \
  && npm cache clean --force

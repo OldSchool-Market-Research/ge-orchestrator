@@ -23,13 +23,12 @@ import (
 )
 
 type Config struct {
-	AgentPath  string // GE_AGENT_PATH
-	McpPath    string // GE_MCP_PATH
-	McpDSN     string // GE_MCP_DSN
-	APIKey     string // MINIMAX_API_KEY passthrough
-	Directive  string // GE_AGENT_DIRECTIVE (absolute path)
-	StateDir   string // GE_ORCH_STATE — run workspaces live under here
-	ExtraEnv   []string
+	AgentPath string // GE_AGENT_PATH
+	McpPath   string // GE_MCP_PATH
+	McpDSN    string // GE_MCP_DSN
+	Directive string // GE_AGENT_DIRECTIVE (absolute path)
+	StateDir  string // GE_ORCH_STATE — run workspaces live under here
+	ExtraEnv  []string
 
 	// CalVetoEnforce turns the calibrated-floor rule from log-only into a
 	// real veto (GE_ORCH_CAL_VETO_MODE=enforce). It ships defaulting to
@@ -135,7 +134,6 @@ func (r *Runner) execute(runID int64, workspace, briefPath string, run *activeRu
 	cmd := exec.Command(r.Cfg.AgentPath)
 	cmd.Dir = workspace
 	cmd.Env = append([]string{
-		"MINIMAX_API_KEY=" + r.Cfg.APIKey,
 		"GE_MCP_PATH=" + r.Cfg.McpPath,
 		"GE_MCP_DSN=" + r.Cfg.McpDSN,
 		"GE_AGENT_DIRECTIVE=" + r.Cfg.Directive,
