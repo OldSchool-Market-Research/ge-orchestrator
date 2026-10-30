@@ -32,7 +32,6 @@ import (
 const (
 	freshMaxAgeS       = 900  // both legs traded within 15 min (S/V/C/U)
 	freshMaxAgeSHold   = 6 * 3600 // H: multi-week items trade sparsely
-	marginOKFraction   = 0.5  // current margin >= 50% of projected
 	entryBand          = 1.02 // entry reachable within +2%
 	exitBand           = 0.98 // exit printing within -2%
 	holdEntryBand      = 1.05 // H: wider bands, coarser horizon

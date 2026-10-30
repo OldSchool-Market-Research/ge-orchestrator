@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -25,47 +27,85 @@ type Signal struct {
 	Reason     *string         `json:"reason,omitempty"`
 }
 
+const (
+	// Repeat guard: over Oct 16-30, 93% of the signals assigned to runs had
+	// been dismissed before (vflip items ~22 times each), 0.45% became ships,
+	// and re-checking them cost ~8.5 tool calls a run. A (kind, item) a run
+	// dismissed repeatDismissMin times inside the window stays out of the
+	// queue unless its score reaches repeatEscapeRatio x the score it was last
+	// dismissed at: only a materially bigger edge re-opens a settled question.
+	repeatDismissWindowDays = 14
+	repeatDismissMin        = 2
+	repeatEscapeRatio       = 2.0
+
+	// agentDismissed selects the verdicts a run actually reached. The harness's
+	// own closes are not falsifications: a signal that aged out unassigned
+	// proved nothing about its item, and neither did one withdrawn in a queue
+	// cleanup (migration 018).
+	agentDismissed = `status='dismissed' AND coalesce(reason,'') <> 'expired unassigned' AND coalesce(reason,'') NOT LIKE 'withdrawn:%'`
+
+	// signalScore is a detection's size in its lens's own units, for the repeat
+	// guard's escape. NULL (no such metric) never escapes.
+	signalScore = `CASE $1::text WHEN 'combo' THEN (%[1]s->>'budget_cycle_gp')::float8
+		WHEN 'volume' THEN abs((%[1]s->>'z')::float8)
+		ELSE (%[1]s->>'gp_cycle')::float8 END`
+)
+
+var upsertSignalSQL = fmt.Sprintf(`INSERT INTO orchestrator.signals (kind, item_id, item_name, metrics)
+	SELECT $1::text,$2::int,$3::text,$4::jsonb
+	WHERE $5::interval = '0'::interval OR (
+		NOT EXISTS (
+			SELECT 1 FROM orchestrator.signals
+			WHERE kind=$1 AND item_id=$2 AND %[1]s
+			  AND resolved_at > now() - $5::interval)
+		AND NOT (
+			(SELECT count(*) FROM orchestrator.signals
+			 WHERE kind=$1 AND item_id=$2 AND %[1]s
+			   AND resolved_at > now() - make_interval(days => $6::int)) >= $7
+			AND coalesce(%[2]s >= $8::float8 * (
+				SELECT %[3]s FROM orchestrator.signals
+				WHERE kind=$1 AND item_id=$2 AND %[1]s
+				ORDER BY resolved_at DESC LIMIT 1), false) = false))
+	ON CONFLICT (kind, item_id) WHERE status IN ('pending','assigned')
+	DO UPDATE SET metrics = EXCLUDED.metrics
+	RETURNING (xmax = 0)`,
+	agentDismissed, fmt.Sprintf(signalScore, "$4::jsonb"), fmt.Sprintf(signalScore, "metrics"))
+
 // UpsertSignal queues a detection. A live (pending/assigned) signal for the
 // same (kind, item) just gets its metrics refreshed — detections don't stack.
 // Returns true when a NEW pending signal was created.
 //
 // dismissCooldown is the dismissal-memory guard (docs/FEEDBACK-LOOP.md §3E):
 // a (kind, item) dismissed within the cooldown is not re-queued — the
-// falsification that killed it is assumed to still hold. Zero disables the
-// guard (watch revalidation passes 0: re-proving is that lens's whole job).
-// The guard suppresses the metrics refresh of an already-live signal in the
-// rare deploy-transition case where a live row coexists with a recent
-// dismissal; that refresh is cosmetic, so the simpler SQL wins.
+// falsification that killed it is assumed to still hold — and neither is one
+// the repeat guard above holds out. Zero disables both (watch revalidation
+// passes 0: re-proving is that lens's whole job). The guards suppress the
+// metrics refresh of an already-live signal in the rare deploy-transition case
+// where a live row coexists with a recent dismissal; that refresh is cosmetic,
+// so the simpler SQL wins.
 func (s *Store) UpsertSignal(ctx context.Context, kind string, itemID int, itemName string, metrics any, dismissCooldown time.Duration) (bool, error) {
 	m, err := json.Marshal(metrics)
 	if err != nil {
 		return false, err
 	}
 	var inserted bool
-	err = s.Pool.QueryRow(ctx, `INSERT INTO orchestrator.signals (kind, item_id, item_name, metrics)
-		SELECT $1,$2,$3,$4
-		WHERE $5::interval = '0'::interval OR NOT EXISTS (
-			SELECT 1 FROM orchestrator.signals
-			WHERE kind=$1 AND item_id=$2 AND status='dismissed'
-			  AND resolved_at > now() - $5::interval)
-		ON CONFLICT (kind, item_id) WHERE status IN ('pending','assigned')
-		DO UPDATE SET metrics = EXCLUDED.metrics
-		RETURNING (xmax = 0)`, kind, itemID, itemName, m, dismissCooldown.String()).Scan(&inserted)
+	err = s.Pool.QueryRow(ctx, upsertSignalSQL, kind, itemID, itemName, m, dismissCooldown.String(),
+		repeatDismissWindowDays, repeatDismissMin, repeatEscapeRatio).Scan(&inserted)
 	if err == pgx.ErrNoRows {
-		return false, nil // cooldown-suppressed: recently dismissed, not re-queued
+		return false, nil // suppressed: recently or repeatedly dismissed, not re-queued
 	}
 	return inserted, err
 }
 
-// LatestDismissal returns when a (kind, item) was last dismissed and the
-// recorded falsification, or nils if it never was. The brief attaches this to
+// LatestDismissal returns when a run last dismissed a (kind, item) and the
+// recorded falsification, or nils if none ever did. The brief attaches this to
 // re-entered candidates so a run starts from the prior verdict instead of
 // re-deriving it.
 func (s *Store) LatestDismissal(ctx context.Context, kind string, itemID int) (*time.Time, *string, error) {
 	var at *time.Time
 	var reason *string
 	err := s.Pool.QueryRow(ctx, `SELECT resolved_at, reason FROM orchestrator.signals
-		WHERE kind=$1 AND item_id=$2 AND status='dismissed'
+		WHERE kind=$1 AND item_id=$2 AND `+agentDismissed+`
 		ORDER BY resolved_at DESC LIMIT 1`, kind, itemID).Scan(&at, &reason)
 	if err == pgx.ErrNoRows {
 		return nil, nil, nil
@@ -73,11 +113,90 @@ func (s *Store) LatestDismissal(ctx context.Context, kind string, itemID int) (*
 	return at, reason, err
 }
 
-// PendingSignals returns the oldest pending signals up to limit.
-func (s *Store) PendingSignals(ctx context.Context, limit int) ([]Signal, error) {
-	return s.collectSignals(ctx, `SELECT signal_id, kind, item_id, item_name, metrics,
+// signalQueueScan bounds how much of the queue one assignment considers. It
+// sits well above the queue's usual size (under 200 live signals).
+const signalQueueScan = 500
+
+// NextSignals picks the signals for one run: the oldest of each kind, shared
+// out by lane weight (pickSignals).
+func (s *Store) NextSignals(ctx context.Context, weights map[string]float64, limit int) ([]Signal, error) {
+	pending, err := s.collectSignals(ctx, `SELECT signal_id, kind, item_id, item_name, metrics,
 		status, run_id, created_at, resolved_at, reason
-		FROM orchestrator.signals WHERE status='pending' ORDER BY created_at LIMIT $1`, limit)
+		FROM orchestrator.signals WHERE status='pending' ORDER BY created_at LIMIT $1`, signalQueueScan)
+	if err != nil {
+		return nil, err
+	}
+	return pickSignals(pending, weights, limit), nil
+}
+
+// kindLane is the lane whose brief weight governs each signal kind. 'watch'
+// (revalidation of the portfolio) answers to no lane.
+var kindLane = map[string]string{
+	"combo": "C", "vflip": "F", "flip": "F", "hvflip": "B", "volume": "V",
+	"seasonal": "S", "band": "H",
+}
+
+// LaneOff reports whether the weights switch off the lane behind a signal
+// kind. A lane with no weight stays on, matching the vetter's rule 0.
+func LaneOff(kind string, weights map[string]float64) bool {
+	w, ok := weights[kindLane[kind]]
+	return ok && w == 0
+}
+
+// pickSignals chooses up to limit signals from pending (oldest first). Watch
+// revalidations go first, up to half the run. The rest is smooth weighted
+// round-robin over the kinds by lane weight, oldest first within a kind, and
+// kinds whose lane is off are skipped: first-in-first-out let the noisiest
+// lens fill every run whatever its lane earned (volume signals: 965 dismissed,
+// 1 shipped over Oct 16-30). A kind with no lane or weight counts as 1.
+func pickSignals(pending []Signal, weights map[string]float64, limit int) []Signal {
+	byKind := map[string][]Signal{}
+	var kinds []string
+	var out []Signal
+	watchCap := limit / 2
+	for _, sig := range pending {
+		if sig.Kind == "watch" {
+			if len(out) < watchCap {
+				out = append(out, sig)
+			}
+			continue
+		}
+		if LaneOff(sig.Kind, weights) {
+			continue
+		}
+		if _, seen := byKind[sig.Kind]; !seen {
+			kinds = append(kinds, sig.Kind)
+		}
+		byKind[sig.Kind] = append(byKind[sig.Kind], sig)
+	}
+	sort.Strings(kinds) // deterministic whatever the queue's order
+	weight := func(kind string) float64 {
+		if w, ok := weights[kindLane[kind]]; ok {
+			return w
+		}
+		return 1
+	}
+	credit := map[string]float64{}
+	for len(out) < limit {
+		best, total := "", 0.0
+		for _, k := range kinds {
+			if len(byKind[k]) == 0 {
+				continue
+			}
+			credit[k] += weight(k)
+			total += weight(k)
+			if best == "" || credit[k] > credit[best] {
+				best = k
+			}
+		}
+		if best == "" {
+			break
+		}
+		credit[best] -= total
+		out = append(out, byKind[best][0])
+		byKind[best] = byKind[best][1:]
+	}
+	return out
 }
 
 // Signals lists recent signals of any status, newest first.

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -55,8 +56,9 @@ type CalibrationRow struct {
 // via Epochs). Strategies are stamped with it at insert; calibration
 // recomputes filter to it, so cross-regime samples never blend.
 func (s *Store) EpochFor(archetype string) int {
+	lane, _, _ := strings.Cut(archetype, ":") // a CalKey shares its lane's epoch
 	if s.Epochs != nil {
-		if e, ok := s.Epochs[archetype]; ok && e > 0 {
+		if e, ok := s.Epochs[lane]; ok && e > 0 {
 			return e
 		}
 	}
@@ -85,14 +87,31 @@ func calibrationFactor(pSurvive, paceRatio *float64) float64 {
 	return f
 }
 
-// RecomputeCalibration recomputes one archetype's factors over the trailing
-// window and appends the result to the history. Vetoed rows never traded and
-// armed V rows that never fired have no meaningful lifetime — both are
-// excluded. Pace divides by the same denominator as the confirm rule
-// (harness projection when present, agent claim as legacy fallback) and
-// counts only post-anchor ticks, mirroring EvalStats.
-func (s *Store) RecomputeCalibration(ctx context.Context, archetype string) (*CalibrationRow, error) {
-	row := CalibrationRow{Archetype: archetype, WindowDays: CalWindowDays, SurviveHours: CalSurviveHours,
+// RelationKinds are public.item_relations' kinds, each with its own lane-C
+// calibration row: over Oct 16-30 a set earned about 10x per ship what a
+// combine or decant did, which one blended factor hid.
+var RelationKinds = []string{"set", "combine", "decant"}
+
+// CalKey is the calibration key for a lane and recipe kind: "C:set" for a
+// conversion whose kind is known, else the lane itself. Rows live in the same
+// archetype column, so the blended "C" row carries on alongside its parts.
+func CalKey(archetype, relKind string) string {
+	if archetype == "C" && relKind != "" {
+		return "C:" + relKind
+	}
+	return archetype
+}
+
+// RecomputeCalibration recomputes one calibration key's factors (a lane, or a
+// CalKey like "C:set") over the trailing window and appends the result to the
+// history. Vetoed rows never traded and armed V rows that never fired have no
+// meaningful lifetime — both are excluded. Pace divides by the same
+// denominator as the confirm rule (harness projection when present, agent
+// claim as legacy fallback) and counts only post-anchor ticks, mirroring
+// EvalStats.
+func (s *Store) RecomputeCalibration(ctx context.Context, key string) (*CalibrationRow, error) {
+	archetype, relKind, _ := strings.Cut(key, ":")
+	row := CalibrationRow{Archetype: key, WindowDays: CalWindowDays, SurviveHours: CalSurviveHours,
 		Epoch: s.EpochFor(archetype)}
 	var medPace *float64
 	err := s.Pool.QueryRow(ctx, `WITH closed AS (
@@ -107,6 +126,8 @@ func (s *Store) RecomputeCalibration(ctx context.Context, archetype string) (*Ca
 			  AND st.state IN ('killed','expired','confirmed')
 			  AND st.closed_at > now() - make_interval(days => $2)
 			  AND (st.archetype <> 'V' OR st.triggered_at IS NOT NULL)
+			  AND ($5 = '' OR EXISTS (SELECT 1 FROM public.item_relations r
+			                          WHERE r.relation_id = st.relation_id AND r.kind = $5))
 		), pace AS (
 			SELECT (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY e.realized_per_1h_gp)
 			        FROM orchestrator.evaluations e
@@ -120,7 +141,7 @@ func (s *Store) RecomputeCalibration(ctx context.Context, archetype string) (*Ca
 		       (SELECT count(*) FROM pace WHERE ratio IS NOT NULL),
 		       (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY ratio)::float8
 		        FROM pace WHERE ratio IS NOT NULL)`,
-		archetype, CalWindowDays, CalSurviveHours, row.Epoch).
+		archetype, CalWindowDays, CalSurviveHours, row.Epoch, relKind).
 		Scan(&row.NClosed, &row.NSurvived, &row.NPace, &medPace)
 	if err != nil {
 		return nil, err

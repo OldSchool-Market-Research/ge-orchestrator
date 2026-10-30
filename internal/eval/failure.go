@@ -73,12 +73,21 @@ func (ev *Evaluator) failureMode(ctx context.Context, st store.Strategy, state s
 	return nil
 }
 
-// recalibrate refreshes the archetype's calibration factors after a close.
-// Failure is logged, not returned — the close already happened and must not
-// be retried as if it hadn't (same contract as watchlist scoring).
+// recalibrate refreshes the archetype's calibration factors after a close: the
+// lane's row plus, for C, one row per recipe kind. Failure is logged, not
+// returned — the close already happened and must not be retried as if it
+// hadn't (same contract as watchlist scoring).
 func (ev *Evaluator) recalibrate(ctx context.Context, archetype string) {
-	if _, err := ev.Store.RecomputeCalibration(ctx, archetype); err != nil {
-		log.Printf("eval: recalibrate %s: %v", archetype, err)
+	keys := []string{archetype}
+	if archetype == "C" {
+		for _, kind := range store.RelationKinds {
+			keys = append(keys, store.CalKey("C", kind))
+		}
+	}
+	for _, key := range keys {
+		if _, err := ev.Store.RecomputeCalibration(ctx, key); err != nil {
+			log.Printf("eval: recalibrate %s: %v", key, err)
+		}
 	}
 }
 

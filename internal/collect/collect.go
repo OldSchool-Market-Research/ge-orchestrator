@@ -31,6 +31,10 @@ type Config struct {
 	// only; watch revalidation is exempt (re-proving is its whole job).
 	// Default 48h; negative disables.
 	DismissCooldown time.Duration
+	// LaneWeights are the brief's lane weights: a lens whose lane is off
+	// (weight 0, like B) keeps its snapshots but queues no signals, since a run
+	// could only dismiss them. nil = every lane on.
+	LaneWeights map[string]float64
 
 	// Lane F — volume flips: deep-market commodities where post-tax margin x
 	// buy limit pays real gp per 4h cycle. Ranked and gated in absolute gp.
@@ -663,6 +667,9 @@ func persist[T any](c *Collector, ctx context.Context, asOf time.Time, lens stri
 	}
 	if err := c.Store.InsertTrendSnapshots(ctx, asOf, lens, trend); err != nil {
 		log.Printf("collect: %s snapshots: %v", lens, err)
+	}
+	if store.LaneOff(lens, c.Cfg.LaneWeights) {
+		return 0
 	}
 	newSignals := 0
 	for _, r := range rows {

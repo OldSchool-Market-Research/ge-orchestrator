@@ -53,12 +53,18 @@ func main() {
 			url, notifier.Cfg.MinPer1hGp, notifier.Cfg.MaxChecksPerHour)
 	}
 
-	calVetoMode := getenv("GE_ORCH_CAL_VETO_MODE", "log")
-	if calVetoMode != "log" && calVetoMode != "enforce" {
-		log.Fatalf("GE_ORCH_CAL_VETO_MODE: %q (want log|enforce)", calVetoMode)
+	if os.Getenv("GE_ORCH_CAL_VETO_MODE") != "" {
+		log.Fatal("GE_ORCH_CAL_VETO_MODE was replaced by GE_ORCH_CAL_VETO_ENFORCE (comma-separated lanes, default F; none = log only)")
+	}
+	calVetoLanes := getenv("GE_ORCH_CAL_VETO_ENFORCE", "F")
+	calVetoEnforce := map[string]bool{}
+	if calVetoLanes != "none" {
+		for _, lane := range strings.Split(calVetoLanes, ",") {
+			calVetoEnforce[strings.TrimSpace(lane)] = true
+		}
 	}
 	graveyardCooldown := durEnv("GE_ORCH_GRAVEYARD_COOLDOWN", 14*24*time.Hour)
-	log.Printf("vet: calibrated floor %s, graveyard cooldown %s", calVetoMode, graveyardCooldown)
+	log.Printf("vet: calibrated floor enforced for %s, graveyard cooldown %s", calVetoLanes, graveyardCooldown)
 
 	r := &runner.Runner{
 		Cfg: runner.Config{
@@ -69,7 +75,7 @@ func main() {
 			StateDir:  getenv("GE_ORCH_STATE", "state"),
 			ExtraEnv:  agentEnvPassthrough(),
 
-			CalVetoEnforce:    calVetoMode == "enforce",
+			CalVetoEnforce:    calVetoEnforce,
 			GraveyardCooldown: graveyardCooldown,
 		},
 		Store:  st,
@@ -103,6 +109,7 @@ func main() {
 		col := &collect.Collector{Store: st, Cfg: collect.Config{
 			// Negative (e.g. -1h) disables dismissal memory; unset means 48h.
 			DismissCooldown: durEnv("GE_ORCH_SIGNAL_DISMISS_COOLDOWN", 0),
+			LaneWeights:     brief.Defaults().Archetypes,
 		}}
 		go func() {
 			// One sweep shortly after boot so a fresh install has trends/signals.

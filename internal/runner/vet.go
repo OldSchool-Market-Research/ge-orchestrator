@@ -18,9 +18,13 @@ const (
 	floorFPerCycleGp = 400_000
 	floorBPerCycleGp = 100_000
 	floorCPerCycleGp = 200_000
+	flipCycleHours   = 4 // lane F: one buy-limit cycle (eval/flip.go)
 	// evSanityFactor caps how far a claimed per-cycle EV may exceed the
-	// live recomputation (margin x fillable units) before it is vetoed.
-	evSanityFactor = 2
+	// live recomputation (margin x fillable units) before it is vetoed. It
+	// was 2 until 2026-10-30: over Oct 16-30, 43 of 81 F ships rode that
+	// slack in with the harness projection already under the floor, and none
+	// of the 81 survived 6h. ge-mcp flip_quote mirrors this (flipVetFactor).
+	evSanityFactor = 1
 	// persistenceGateMin is the lane-F ship gate on margin_persistence_24h:
 	// the claimed post-tax margin must have held (at >= 50% of its width) in
 	// at least this share of the last 24 hours. The instantaneous EV-sanity
@@ -85,9 +89,11 @@ const (
 //     the instantaneous checks can't see: a spike-top margin that is real
 //     for the minute the agent quotes it and gone before the offers fill.
 //
-// Accepted F strategies also get the harness's own projection attached
-// (eval.ProjectFlipPer1h -> strategies.projected_per_1h_gp), which becomes
-// the confirm-ratio denominator (migration 009).
+// F strategies must also clear the lane floor per cycle on the harness's own
+// projection (eval.ProjectFlipPer1h: slippage, tax, participation-capped
+// units): a ship that starts below it dies on its first ticks. Accepted ones
+// keep that projection (strategies.projected_per_1h_gp), which becomes the
+// confirm-ratio denominator (migration 009).
 //
 // Since the calibration release two record-fed rules join the list:
 //
@@ -96,9 +102,11 @@ const (
 //     kill is inside the cooldown. A different archetype on the same item
 //     passes: a materially new signal class is the designed escape hatch.
 //  7. calibrated floor (§3A) — factor × claimed per-cycle gp must still
-//     clear the lane floor. Runs in log-only mode until
-//     GE_ORCH_CAL_VETO_MODE=enforce, so the first week measures how many
-//     ships it WOULD kill before it kills any.
+//     clear the lane floor. Enforced for the lanes in
+//     GE_ORCH_CAL_VETO_ENFORCE (default F, whose ships all died inside 6h
+//     over Oct 16-30); the other lanes only log what it WOULD kill. A
+//     conversion is judged on its recipe kind's factor (C earned 69M from
+//     ships this rule would have blocked, so it stays log-only).
 //  8. recipe integrity + no-arb (C) — the legs must be exactly the
 //     item_relations recipe the strategy cites (every component, either
 //     direction when reversible), and a free reversible conversion whose
@@ -112,7 +120,9 @@ const (
 func (r *Runner) vet(ctx context.Context, p brief.Params, list []store.SidecarStrategy) (accepted []store.SidecarStrategy, vetoed []store.Vetoed) {
 	rec := r.loadRecord(ctx)
 	for _, st := range list {
-		reason, proj := r.vetOne(ctx, p, st, rec)
+		var relKind string
+		reason, proj := r.vetOne(ctx, p, st, rec, &relKind)
+		st.RelationKind = relKind
 		if reason != "" {
 			vetoed = append(vetoed, store.Vetoed{Strategy: st, Reason: reason})
 			continue
@@ -186,7 +196,29 @@ func (r *Runner) loadRecord(ctx context.Context) *record {
 	return rec
 }
 
-func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStrategy, rec *record) (string, *int64) {
+// CalRowFor is the strategy's own calibration row: its recipe kind's when one
+// exists, else its lane's.
+func (rec *record) CalRowFor(st store.SidecarStrategy) *store.CalibrationRow {
+	if row := rec.CalRow(store.CalKey(st.Archetype, st.RelationKind)); row != nil {
+		return row
+	}
+	return rec.CalRow(st.Archetype)
+}
+
+// FactorFor is CalRowFor's factor, with Factor's fail-open: no usable
+// measurement reads as 1.
+func (rec *record) FactorFor(st store.SidecarStrategy) float64 {
+	if rec != nil && rec.factors != nil {
+		if f, ok := rec.factors[store.CalKey(st.Archetype, st.RelationKind)]; ok && f > 0 {
+			return f
+		}
+	}
+	return rec.Factor(st.Archetype)
+}
+
+// vetOne returns the veto reason ("" = accepted) and the harness projection.
+// relKind receives a conversion's recipe kind once its relation is looked up.
+func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStrategy, rec *record, relKind *string) (string, *int64) {
 	if len(st.Items) == 0 {
 		return "", nil // InsertStrategies rejects the whole sidecar with a real error
 	}
@@ -215,6 +247,10 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 			if rel, err = r.Store.RelationByID(ctx, *st.RelationID); err != nil {
 				log.Printf("vet %s: relation %d lookup: %v", st.ID, *st.RelationID, err)
 				lookupOK = false // fail open, like every record-fed rule
+			}
+			if rel != nil {
+				st.RelationKind = rel.Kind
+				*relKind = rel.Kind
 			}
 		}
 		if lookupOK {
@@ -284,11 +320,19 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 		return reason, nil
 	}
 
-	if reason := calibratedFloorVeto(st, rec.Factor(st.Archetype)); reason != "" {
-		if r.Cfg.CalVetoEnforce {
+	var proj *int64
+	if st.Archetype == "F" && snap != nil {
+		proj = eval.ProjectFlipPer1h(st.EntryPrice, st.ExitPrice, st.Size.UnitsUsed, snap.Vol30m)
+		if reason := flipProjectionVeto(proj); reason != "" {
 			return reason, nil
 		}
-		// Log-only week: count what the rule WOULD kill before letting it.
+	}
+
+	if reason := calibratedFloorVeto(st, rec.FactorFor(st)); reason != "" {
+		if r.Cfg.CalVetoEnforce[st.Archetype] {
+			return reason, nil
+		}
+		// Not enforced for this lane: count what the rule WOULD kill.
 		log.Printf("vet %s: would veto (cal-floor log-only): %s", st.ID, reason)
 	}
 
@@ -307,10 +351,6 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 		}
 	}
 
-	var proj *int64
-	if st.Archetype == "F" && snap != nil {
-		proj = eval.ProjectFlipPer1h(st.EntryPrice, st.ExitPrice, st.Size.UnitsUsed, snap.Vol30m)
-	}
 	if st.Archetype == "C" && r.Prices != nil && len(st.Legs) > 0 {
 		// C gets a harness projection like F: the ping gate and the confirm
 		// ratio should judge against the harness's haircut arithmetic, not
@@ -360,6 +400,8 @@ func calibratedFloorVeto(st store.SidecarStrategy, factor float64) string {
 		floor = floorFPerCycleGp
 	case "B":
 		floor = floorBPerCycleGp
+	case "C":
+		floor = floorCPerCycleGp
 	default:
 		return ""
 	}
@@ -369,6 +411,21 @@ func calibratedFloorVeto(st store.SidecarStrategy, factor float64) string {
 	}
 	return fmt.Sprintf("vetoed at ship time: calibrated per_cycle_gp %d (factor %.2f x claimed %d) below the %d lane-%s floor",
 		calibrated, factor, st.ExpectedValue.PerCycleGp, floor, st.Archetype)
+}
+
+// flipProjectionVeto holds a lane-F ship to the harness's own projection
+// (eval.ProjectFlipPer1h, per hour of a 4h cycle): nil means the offers don't
+// clear slippage and tax at fillable size. ge-mcp flip_quote reports the same
+// test as clears_f_floor, so the agent can run it before pitching.
+func flipProjectionVeto(per1h *int64) string {
+	if per1h == nil {
+		return "vetoed at ship time: harness projection is null: the offers do not clear slippage + tax at fillable size"
+	}
+	if cycle := *per1h * flipCycleHours; cycle < floorFPerCycleGp {
+		return fmt.Sprintf("vetoed at ship time: harness projection %d gp per 4h cycle is below the %d lane-F floor (flip_quote: clears_f_floor)",
+			cycle, floorFPerCycleGp)
+	}
+	return ""
 }
 
 // flipPersistenceVeto applies the lane-F persistence gate. okHours comes from

@@ -30,11 +30,11 @@ type Config struct {
 	StateDir  string // GE_ORCH_STATE — run workspaces live under here
 	ExtraEnv  []string
 
-	// CalVetoEnforce turns the calibrated-floor rule from log-only into a
-	// real veto (GE_ORCH_CAL_VETO_MODE=enforce). It ships defaulting to
-	// log-only so a week of "would veto" lines sizes the rule before it
-	// costs any ships (FEEDBACK-LOOP.md §6 Q2).
-	CalVetoEnforce bool
+	// CalVetoEnforce names the lanes whose calibrated-floor rule is a real
+	// veto (GE_ORCH_CAL_VETO_ENFORCE, default F); every other lane only logs
+	// the "would veto" lines that size the rule before it costs any ships
+	// (FEEDBACK-LOOP.md §6 Q2).
+	CalVetoEnforce map[string]bool
 	// GraveyardCooldown is how long after its last kill a graveyarded
 	// item×archetype stays unpitchable (GE_ORCH_GRAVEYARD_COOLDOWN,
 	// default 14d; 0 disables the veto).
@@ -81,9 +81,10 @@ func (r *Runner) Trigger(ctx context.Context, p brief.Params, source string) (in
 		return r.active.runID, ErrBusy
 	}
 
-	// Pull the oldest pending signals into this run's brief — the work-queue
-	// mechanism that makes consecutive runs investigate different candidates.
-	assigned, err := r.Store.PendingSignals(ctx, 10)
+	// Pull pending signals into this run's brief, shared out by lane weight —
+	// the work-queue mechanism that makes consecutive runs investigate different
+	// candidates.
+	assigned, err := r.Store.NextSignals(ctx, p.Archetypes, 10)
 	if err != nil {
 		return 0, err
 	}
@@ -263,7 +264,7 @@ func (r *Runner) ingest(ctx context.Context, runID int64, p brief.Params, worksp
 		// factor) lets the gate skip calibration when it's only a default.
 		rec := r.loadRecord(ctx)
 		for _, st := range accepted {
-			r.Notify.StrategyShipped(ctx, st, rec.CalRow(st.Archetype))
+			r.Notify.StrategyShipped(ctx, st, rec.CalRowFor(st))
 		}
 	}
 	// Apply the run's verdicts on its assigned signals, then return any it

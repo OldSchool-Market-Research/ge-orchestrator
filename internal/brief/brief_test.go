@@ -33,11 +33,46 @@ func TestWriteCalibration(t *testing.T) {
 			t.Errorf("calibration section missing %q in:\n%s", want, out)
 		}
 	}
-	// C has no gp/cycle floor — no implied-raw-claim sentence on its line.
-	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "- C: factor") && strings.Contains(line, "floor") {
-			t.Errorf("C line must not carry a floor translation: %q", line)
-		}
+	// 200,000 / 0.125 = 1,600,000 raw gp/cycle: C has a floor too.
+	if !strings.Contains(out, "~1,600,000 gp/cycle") {
+		t.Errorf("C line must translate its floor:\n%s", out)
+	}
+	// C leads F, whatever order the rows arrive in.
+	if strings.Index(out, "- C: factor") > strings.Index(out, "- F: factor") {
+		t.Errorf("C must render before F:\n%s", out)
+	}
+}
+
+func TestCalOrderPutsKindsAfterTheirLane(t *testing.T) {
+	got := calOrder([]store.CalibrationRow{
+		{Archetype: "F"}, {Archetype: "C:set"}, {Archetype: "C"}, {Archetype: "C:decant"},
+	})
+	var keys []string
+	for _, r := range got {
+		keys = append(keys, r.Archetype)
+	}
+	if s := strings.Join(keys, " "); s != "C C:decant C:set F" {
+		t.Fatalf("order %q", s)
+	}
+}
+
+func TestTrackAdviceReadsSurvival(t *testing.T) {
+	dead := &store.CalibrationRow{PSurvive: fp(0), NSurvived: 0, NClosed: 81, SurviveHours: 6}
+	if got := trackAdvice(81, 1.15, dead); !strings.Contains(got, "0 of 81") || strings.Contains(got, "keep mining") {
+		t.Errorf("a dead lane must not read as holding up: %q", got)
+	}
+	live := &store.CalibrationRow{PSurvive: fp(0.77), NSurvived: 134, NClosed: 174, SurviveHours: 6}
+	if got := trackAdvice(174, 0.9, live); !strings.Contains(got, "keep mining") {
+		t.Errorf("a surviving lane above the bar: %q", got)
+	}
+	if got := trackAdvice(174, 0.4, live); !strings.Contains(got, "have not held") {
+		t.Errorf("a surviving lane under the bar: %q", got)
+	}
+	if got := trackAdvice(3, 1.15, dead); !strings.Contains(got, "insufficient") {
+		t.Errorf("a thin sample: %q", got)
+	}
+	if got := trackAdvice(20, 0.9, nil); !strings.Contains(got, "keep mining") {
+		t.Errorf("no calibration row: %q", got)
 	}
 }
 

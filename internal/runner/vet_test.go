@@ -87,11 +87,70 @@ func TestCalibratedFloorVeto(t *testing.T) {
 	if reason := calibratedFloorVeto(flip(2_100_000), 0.2); reason != "" {
 		t.Errorf("2.1M claim at factor 0.2 (420k calibrated) should pass, got %q", reason)
 	}
-	// Lanes without a floor never trip the rule.
+	// C holds its own 200k floor: 500k x 0.3 = 150k.
 	c := store.SidecarStrategy{Archetype: "C"}
-	c.ExpectedValue.PerCycleGp = 1
-	if reason := calibratedFloorVeto(c, 0.05); reason != "" {
-		t.Errorf("C has no floor, got %q", reason)
+	c.ExpectedValue.PerCycleGp = 500_000
+	if reason := calibratedFloorVeto(c, 0.3); !strings.Contains(reason, "200000 lane-C floor") {
+		t.Errorf("C under its calibrated floor: %q", reason)
+	}
+	// Lanes without a floor never trip the rule.
+	v := store.SidecarStrategy{Archetype: "V"}
+	v.ExpectedValue.PerCycleGp = 1
+	if reason := calibratedFloorVeto(v, 0.05); reason != "" {
+		t.Errorf("V has no floor, got %q", reason)
+	}
+}
+
+func TestFlipProjectionVeto(t *testing.T) {
+	per1h := func(v int64) *int64 { return &v }
+	if reason := flipProjectionVeto(nil); !strings.Contains(reason, "null") {
+		t.Errorf("a null projection must veto: %q", reason)
+	}
+	if reason := flipProjectionVeto(per1h(99_999)); !strings.Contains(reason, "399996") {
+		t.Errorf("99,999/hr is 399,996 per cycle: %q", reason)
+	}
+	if reason := flipProjectionVeto(per1h(100_000)); reason != "" {
+		t.Errorf("100k/hr is exactly the floor: %q", reason)
+	}
+}
+
+func TestEvSanityHasNoSlack(t *testing.T) {
+	margin := int64(100)
+	st := store.SidecarStrategy{Archetype: "F"}
+	st.Size.UnitsUsed = 5_000
+	snap := &eval.Snap{Margin: &margin, Vol30m: 100_000} // fillable 120k: units bind, ceiling 500k
+	st.ExpectedValue.PerCycleGp = 500_000
+	if reason := evSanity(st, snap); reason != "" {
+		t.Errorf("a claim at the ceiling passes: %q", reason)
+	}
+	st.ExpectedValue.PerCycleGp = 500_001
+	if reason := evSanity(st, snap); reason == "" {
+		t.Error("a claim above the ceiling must veto")
+	}
+}
+
+func TestRecordKindFactorFallsBackToLane(t *testing.T) {
+	rec := &record{
+		factors: map[string]float64{"C": 0.3, "C:set": 0.6},
+		cal:     map[string]store.CalibrationRow{"C": {Archetype: "C"}, "C:set": {Archetype: "C:set"}},
+	}
+	set := store.SidecarStrategy{Archetype: "C", RelationKind: "set"}
+	decant := store.SidecarStrategy{Archetype: "C", RelationKind: "decant"}
+	if f := rec.FactorFor(set); f != 0.6 {
+		t.Errorf("set factor %v", f)
+	}
+	if f := rec.FactorFor(decant); f != 0.3 {
+		t.Errorf("a kind with no row falls back to its lane: %v", f)
+	}
+	if row := rec.CalRowFor(set); row == nil || row.Archetype != "C:set" {
+		t.Errorf("set row %+v", row)
+	}
+	if row := rec.CalRowFor(decant); row == nil || row.Archetype != "C" {
+		t.Errorf("decant row %+v", row)
+	}
+	var none *record
+	if f := none.FactorFor(set); f != 1 {
+		t.Errorf("nil record: %v", f)
 	}
 }
 

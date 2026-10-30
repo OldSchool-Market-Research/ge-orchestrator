@@ -279,7 +279,7 @@ func comboStrategy() store.Strategy {
 	return store.Strategy{
 		StrategyID: 3, Archetype: "C", PrimaryItemID: 2434,
 		EntryPrice: 27600, ExitPrice: 27930, // projected margin 330/conversion
-		UnitsUsed: i64(200), PerCycleGp: i64(66000), Per1hGp: i64(16500),
+		UnitsUsed: i64(1000), PerCycleGp: i64(330000), Per1hGp: i64(82500),
 		Legs: []store.Leg{
 			{ItemID: 139, Name: "Prayer potion(3)", Side: "buy", Qty: 4, Price: 6900},
 			{ItemID: 2434, Name: "Prayer potion(4)", Side: "sell", Qty: 3, Price: 9500},
@@ -298,7 +298,7 @@ func TestComboMarginMath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Raw: sell 3x(9500-190) - buy 4x6900 = 27930-27600 = 330 >= 0.5x330 ✓
+	// Raw: sell 3x(9500-190) - buy 4x6900 = 27930-27600 = 330; x 1000 = 330k >= 100k ✓
 	if !checks["margin_ok"] || !checks["legs_fresh"] || !checks["legs_priced"] {
 		t.Fatalf("checks: %v", checks)
 	}
@@ -333,7 +333,7 @@ func TestComboCollapsedMarginKills(t *testing.T) {
 		139:  {Low: i64(7200), High: i64(7300), LowAgeS: iptr(120), HighAgeS: iptr(120), Vol30m: 9000},
 		2434: {Low: i64(9300), High: i64(9400), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000},
 	}}
-	// Raw margin: 3x(9400-188) - 4x7200 = 27636 - 28800 = -1164 < 165.
+	// Raw margin: 3x(9400-188) - 4x7200 = 27636 - 28800 = -1164 per conversion.
 	ev := fixedEvaluator(src, tue1200)
 	e, _, err := ev.computeCombo(context.Background(), comboStrategy())
 	if err != nil {
@@ -420,45 +420,53 @@ func TestProjectFlipPer1h(t *testing.T) {
 	}
 }
 
-func TestComboCalibratedMarginYardstick(t *testing.T) {
-	// Live raw margin: 3x(9440-188) - 4x7000 = 27756 - 28000 = -244.
-	// Projected 330: uncalibrated bar 165 kills this; factor 0.2 drops the
-	// bar to 33 — still above -244, so calibration alone must NOT save a
-	// genuinely negative margin.
-	src := &fakeSource{snaps: map[int]*Snap{
-		139:  {Low: i64(7000), High: i64(7100), LowAgeS: iptr(120), HighAgeS: iptr(120), Vol30m: 9000},
-		2434: {Low: i64(9300), High: i64(9440), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000},
-	}}
-	ev := fixedEvaluator(src, tue1200)
-	ev.CalFactors = map[string]float64{"C": 0.2}
-	e, _, err := ev.computeCombo(context.Background(), comboStrategy())
-	if err != nil {
-		t.Fatal(err)
+func TestComboKillBarIsAbsolute(t *testing.T) {
+	// 1000 conversions: half the 200k floor is 100 gp per conversion. The
+	// sell leg stays at 3x(9500-190) = 27930; the buy leg sets the margin.
+	priced := func(buy int64) *fakeSource {
+		return &fakeSource{snaps: map[int]*Snap{
+			139:  {Low: i64(buy), High: i64(buy + 100), LowAgeS: iptr(120), HighAgeS: iptr(120), Vol30m: 9000},
+			2434: {Low: i64(9300), High: i64(9500), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000},
+		}}
 	}
-	if e.Verdict != "kill_signal" {
-		t.Fatalf("negative live margin must kill at any factor, got %s", e.Verdict)
+	cases := []struct {
+		name string
+		buy  int64 // 4 x buy on the input side
+		kill bool
+	}{
+		{"102/conversion clears the bar", 6957, false}, // 27930-27828 = 102
+		{"98/conversion is under it", 6958, true},      // 27930-27832 = 98
+		{"a negative margin is under it", 7200, true},  // 27930-28800 = -870
+	}
+	for _, c := range cases {
+		// The calibration factor no longer moves the bar, in either direction.
+		for _, factors := range []map[string]float64{nil, {"C": 0.2}, {"C": 1.2}} {
+			ev := fixedEvaluator(priced(c.buy), tue1200)
+			ev.CalFactors = factors
+			e, _, err := ev.computeCombo(context.Background(), comboStrategy())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := e.Verdict == "kill_signal"; got != c.kill {
+				t.Errorf("%s (factors %v): verdict %s", c.name, factors, e.Verdict)
+			}
+		}
 	}
 
-	// Live raw margin: 3x(9500-190) - 4x7250 = 27930 - 29000 = ... use a
-	// margin between the calibrated bar (33) and the uncalibrated one (165):
-	// buy 4x6960 = 27840, sell 3x(9330-186) = 27432 -> raw -408. Pick prices
-	// giving raw = 100: buy 4x6957=27828, sell 3x(9500-190)=27930 -> 102.
-	src2 := &fakeSource{snaps: map[int]*Snap{
-		139:  {Low: i64(6957), High: i64(7100), LowAgeS: iptr(120), HighAgeS: iptr(120), Vol30m: 9000},
-		2434: {Low: i64(9300), High: i64(9500), LowAgeS: iptr(90), HighAgeS: iptr(90), Vol30m: 6000},
-	}}
-	evUncal := fixedEvaluator(src2, tue1200)
-	if e, _, err := evUncal.computeCombo(context.Background(), comboStrategy()); err != nil {
-		t.Fatal(err)
-	} else if e.Verdict != "kill_signal" {
-		t.Fatalf("margin 102 < uncalibrated bar 165 must kill, got %s", e.Verdict)
-	}
-	evCal := fixedEvaluator(src2, tue1200)
-	evCal.CalFactors = map[string]float64{"C": 0.2}
-	if e, _, err := evCal.computeCombo(context.Background(), comboStrategy()); err != nil {
+	// No recorded size: only a non-positive margin fails.
+	st := comboStrategy()
+	st.UnitsUsed = nil
+	ev := fixedEvaluator(priced(6958), tue1200)
+	if e, _, err := ev.computeCombo(context.Background(), st); err != nil {
 		t.Fatal(err)
 	} else if e.Verdict == "kill_signal" {
-		t.Fatal("margin 102 >= calibrated bar 33 must not kill")
+		t.Error("a positive margin with no recorded size must not kill")
+	}
+	ev = fixedEvaluator(priced(7200), tue1200)
+	if e, _, err := ev.computeCombo(context.Background(), st); err != nil {
+		t.Fatal(err)
+	} else if e.Verdict != "kill_signal" {
+		t.Errorf("a negative margin with no recorded size: %s", e.Verdict)
 	}
 }
 

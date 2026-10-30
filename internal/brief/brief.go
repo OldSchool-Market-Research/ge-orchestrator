@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,10 +27,10 @@ type Params struct {
 	Notes         string             `json:"notes"`
 }
 
-// F/B are the primary lanes; S/H are retired as shippable kinds but stay in
-// the order so their paper-trade track record still renders (it is the
-// evidence for why they were retired).
-var archetypeOrder = []string{"F", "B", "V", "C", "U", "S", "H"}
+// C is the primary lane; S/H are retired as shippable kinds but stay in the
+// order so their paper-trade track record still renders (it is the evidence
+// for why they were retired).
+var archetypeOrder = []string{"C", "F", "B", "V", "U", "S", "H"}
 
 var archetypeNames = map[string]string{
 	"F": "volume flip", "B": "high-value flip",
@@ -41,9 +42,11 @@ func Defaults() Params {
 	return Params{
 		// The operator runs a research engine on a 50M budget: the engine
 		// surfaces and paper-proves every option worth running at that scale;
-		// the operator picks. F is primary; C is the repeat-on-your-own-time
-		// lane (decants/sets/combines vs the item_relations table — the agent
-		// notes-and-moves-on if the table is absent); V/U opportunistic; S/H
+		// the operator picks. C is primary, the repeat-on-your-own-time lane
+		// (decants/sets/combines vs the item_relations table — the agent
+		// notes-and-moves-on if the table is absent): +299M est. over Oct 16-30
+		// against F's +3.9M. F drops to opportunistic with V/U: 0 of its 81
+		// closes that fortnight survived 6h. S/H
 		// retired (0% confirmed at this data age). B is OFF (weight 0,
 		// vet-enforced) on its first-fortnight record: 3/33 winners, -67.5M
 		// realized, and still -21.6M in the most generous counterfactual
@@ -53,7 +56,7 @@ func Defaults() Params {
 		// (roundtrips-gated, spread-capture eval), not as the mid-marked
 		// multi-day hold this lane actually was.
 		CapitalGp: 50_000_000, Risk: "low", MinConfidence: "medium",
-		Archetypes: map[string]float64{"F": 1.5, "B": 0, "V": 0.5, "C": 1, "U": 0.5},
+		Archetypes: map[string]float64{"F": 0.5, "B": 0, "V": 0.5, "C": 1.5, "U": 0.5},
 		// The operator's own two screens, in their words: they ARE the vflip
 		// and hvflip sweep lenses. The bar for shipping a flip: margin real
 		// (fresh), persistent (reappears across the day), fillable (volume
@@ -117,10 +120,11 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 		}
 		b.WriteString("\n")
 	}
-	b.WriteString("- Objective: rank ALL viable options by absolute post-tax gp/day at fillable size. The floor is absolute (F: 400k gp/cycle = 100k gp/hr, B: 100k/cycle) — dismiss below-floor candidates whatever their ROI%. Shipping NOTHING is a legitimate outcome when nothing clears the bar.\n")
+	b.WriteString("- Objective: rank ALL viable options by absolute post-tax gp/day at fillable size. The floor is absolute (C: 200k gp/cycle, F: 400k gp/cycle = 100k gp/hr, B: 100k/cycle) — dismiss below-floor candidates whatever their ROI%. Shipping NOTHING is a legitimate outcome when nothing clears the bar.\n")
 	b.WriteString("- Every F/B/C strategy must state its attention contract (offer cadence, longest safe unattended window, reaction risk) — the operator decides what fits their day.\n")
 
-	if cal, err := s.CalibrationLatest(ctx); err == nil && len(cal) > 0 {
+	cal, calErr := s.CalibrationLatest(ctx)
+	if calErr == nil && len(cal) > 0 {
 		modes, _ := s.FailureModeCounts(ctx, store.CalWindowDays)
 		writeCalibration(&b, cal, modes)
 	}
@@ -177,14 +181,7 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 			}
 			if r.RealizedVsProjected != nil {
 				line += fmt.Sprintf(", realized/projected %.2f", *r.RealizedVsProjected)
-				switch {
-				case closed < 5:
-					line += " — insufficient sample, treat as unproven."
-				case *r.RealizedVsProjected >= 0.8:
-					line += " — holding up, keep mining."
-				case *r.RealizedVsProjected <= 0.5:
-					line += " — projections have not held; require stronger evidence before pitching."
-				}
+				line += trackAdvice(closed, *r.RealizedVsProjected, calRow(cal, r.Archetype))
 			}
 			b.WriteString(line + "\n")
 		}
@@ -226,7 +223,63 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 const (
 	briefFloorFPerCycleGp = 400_000
 	briefFloorBPerCycleGp = 100_000
+	briefFloorCPerCycleGp = 200_000
 )
+
+// trackMinSurvive is the share of recent closes that must outlive the
+// survival bar before a realized/projected ratio can read as good news. The
+// ratio only measures how a ship paced while it lived: F read 1.15, "keep
+// mining", through a fortnight in which 0 of its 81 closes survived 6h.
+const trackMinSurvive = 0.2
+
+// calRow finds an archetype's calibration row, nil when none exists.
+func calRow(cal []store.CalibrationRow, archetype string) *store.CalibrationRow {
+	for i := range cal {
+		if cal[i].Archetype == archetype {
+			return &cal[i]
+		}
+	}
+	return nil
+}
+
+// trackAdvice is the track-record line's verdict on a realized/projected
+// ratio, read against how many recent closes survived at all.
+func trackAdvice(closed int, ratio float64, cal *store.CalibrationRow) string {
+	switch {
+	case closed < 5:
+		return " — insufficient sample, treat as unproven."
+	case cal != nil && cal.PSurvive != nil && *cal.PSurvive < trackMinSurvive:
+		return fmt.Sprintf(" — but only %d of %d recent closes lived past %.0fh, so projections have not held; require stronger evidence before pitching.",
+			cal.NSurvived, cal.NClosed, cal.SurviveHours)
+	case ratio >= 0.8:
+		return " — holding up, keep mining."
+	case ratio <= 0.5:
+		return " — projections have not held; require stronger evidence before pitching."
+	}
+	return ""
+}
+
+// calOrder sorts calibration rows for the brief: lanes in archetypeOrder, each
+// lane's blended row before its per-recipe-kind rows (C:combine, C:decant, ...).
+func calOrder(cal []store.CalibrationRow) []store.CalibrationRow {
+	rank := func(key string) int {
+		lane, _, _ := strings.Cut(key, ":")
+		for i, a := range archetypeOrder {
+			if a == lane {
+				return i
+			}
+		}
+		return len(archetypeOrder)
+	}
+	out := append([]store.CalibrationRow(nil), cal...)
+	sort.SliceStable(out, func(i, j int) bool {
+		if ri, rj := rank(out[i].Archetype), rank(out[j].Archetype); ri != rj {
+			return ri < rj
+		}
+		return out[i].Archetype < out[j].Archetype
+	})
+	return out
+}
 
 // writeCalibration renders the harness-measured factors (docs/FEEDBACK-LOOP.md
 // §3A) and the failure-mode digest (§3B). Pure over its inputs so it is
@@ -235,17 +288,20 @@ func writeCalibration(b *strings.Builder, cal []store.CalibrationRow, modes []st
 	b.WriteString("\n### Calibration (harness-measured from the paper record — pre-filter your arithmetic with it)\n")
 	fmt.Fprintf(b, "- EV_calibrated = factor x your claimed EV, where factor = p_survive (share of closed ships alive past %.0fh, trailing %dd) x pace_ratio (median realized/projected of those survivors). Judge your own candidates by their calibrated EV — the harness does.\n",
 		store.CalSurviveHours, store.CalWindowDays)
-	for _, r := range cal {
+	for _, r := range calOrder(cal) {
 		fmt.Fprintf(b, "- %s: factor %.2f = p_survive %s x pace %s.",
 			r.Archetype, r.Factor,
 			calComponent(r.PSurvive, fmt.Sprintf("%d of %d closed alive", r.NSurvived, r.NClosed), r.NClosed),
 			calComponent(r.PaceRatio, fmt.Sprintf("n=%d", r.NPace), r.NPace))
 		var floor int64
-		switch r.Archetype {
+		lane, _, _ := strings.Cut(r.Archetype, ":")
+		switch lane {
 		case "F":
 			floor = briefFloorFPerCycleGp
 		case "B":
 			floor = briefFloorBPerCycleGp
+		case "C":
+			floor = briefFloorCPerCycleGp
 		}
 		if floor > 0 && r.Factor > 0 && r.Factor < 1 {
 			fmt.Fprintf(b, " At this factor the %s gp/cycle floor implies a raw claim of ~%s gp/cycle to hold up.",

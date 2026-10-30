@@ -24,6 +24,9 @@ func TestSidecarRoundTrip(t *testing.T) {
 	}
 	defer s.Pool.Close()
 
+	if _, err := s.OrphanRunningRuns(ctx); err != nil { // one running run at a time, in-DB
+		t.Fatal(err)
+	}
 	runID, err := s.CreateRun(ctx, json.RawMessage(`{}`), "test brief", "manual")
 	if err != nil {
 		t.Fatal(err)
