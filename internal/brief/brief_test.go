@@ -177,3 +177,18 @@ func TestSweepHeadingMarksStaleScans(t *testing.T) {
 		t.Error("both fresh")
 	}
 }
+
+func TestDefaultsKeepFlipLanesOff(t *testing.T) {
+	p := Defaults()
+	for _, lane := range []string{"F", "B"} {
+		if w, ok := p.Archetypes[lane]; !ok || w != 0 {
+			t.Errorf("lane %s must be explicitly off, got %v (ok=%v)", lane, w, ok)
+		}
+	}
+	if p.Archetypes["C"] <= 0 || strings.TrimSpace(p.Notes) != "" {
+		t.Errorf("C on and no flip notes: %+v", p)
+	}
+	if err := p.Validate(); err != nil {
+		t.Error(err)
+	}
+}
