@@ -128,6 +128,9 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 
 	writeOpenBook(ctx, &b, s, p)
 	writeWatchlist(ctx, &b, s)
+	if list, err := s.Proposals(ctx, "", maxBriefProposals); err == nil {
+		writeProposals(&b, list)
+	}
 
 	if len(assigned) > 0 {
 		b.WriteString("\n### Assigned candidates (from the collector's work queue — investigate these FIRST)\n")
@@ -430,6 +433,28 @@ func writeWatchlist(ctx context.Context, b *strings.Builder, s *store.Store) {
 		line += ")"
 		if w.Note != nil && strings.TrimSpace(*w.Note) != "" {
 			line += " — " + strings.TrimSpace(*w.Note)
+		}
+		b.WriteString(line + "\n")
+	}
+}
+
+// maxBriefProposals bounds what the brief spends on the list of ideas on file.
+const maxBriefProposals = 10
+
+// writeProposals renders what's already on file, so a run doesn't re-file it and can
+// learn from the operator's calls. Empty input writes nothing.
+func writeProposals(b *strings.Builder, list []store.Proposal) {
+	if len(list) == 0 {
+		return
+	}
+	b.WriteString("\n### Your proposals on file (don't re-file these; a rejected one needs new evidence)\n")
+	for _, p := range list {
+		line := fmt.Sprintf("- [%s, %s] %s", p.Kind, p.Status, p.Title)
+		if p.TimesProposed > 1 {
+			line += fmt.Sprintf(" (filed %d times)", p.TimesProposed)
+		}
+		if p.DecisionNote != nil && strings.TrimSpace(*p.DecisionNote) != "" {
+			line += " — operator: " + strings.TrimSpace(*p.DecisionNote)
 		}
 		b.WriteString(line + "\n")
 	}

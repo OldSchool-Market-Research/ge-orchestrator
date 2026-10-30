@@ -207,4 +207,22 @@ func TestDefaultsKeepFlipLanesOff(t *testing.T) {
 	if err := p.Validate(); err != nil {
 		t.Error(err)
 	}
+func TestWriteProposals(t *testing.T) {
+	var empty strings.Builder
+	writeProposals(&empty, nil)
+	if empty.Len() != 0 {
+		t.Errorf("no proposals, no section: %q", empty.String())
+	}
+	note := "the lane is yours, not mine"
+	var b strings.Builder
+	writeProposals(&b, []store.Proposal{
+		{Kind: "recipe", Status: "open", Title: "Ranger boots set", TimesProposed: 3},
+		{Kind: "lane", Status: "rejected", Title: "Alching", TimesProposed: 1, DecisionNote: &note},
+	})
+	out := b.String()
+	for _, want := range []string{"- [recipe, open] Ranger boots set (filed 3 times)", "- [lane, rejected] Alching — operator: the lane is yours, not mine"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
 }

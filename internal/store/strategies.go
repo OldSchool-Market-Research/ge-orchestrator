@@ -129,6 +129,7 @@ type Sidecar struct {
 	ReportPath     string            `json:"report_path"`
 	Strategies     []SidecarStrategy `json:"strategies"`
 	SignalVerdicts []SignalVerdict   `json:"signal_verdicts,omitempty"`
+	Proposals      []SidecarProposal `json:"proposals,omitempty"`
 }
 
 // evalWindowHours resolves the paper-trading window: the model's explicit

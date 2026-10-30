@@ -564,5 +564,18 @@ func TestProjectComboUsesFourHourVolume(t *testing.T) {
 	snaps[139].Vol4h = 0
 	if p := ProjectComboPer1h(legs, 1000, snaps); p != nil {
 		t.Fatalf("a leg with no 4h volume can't fill: %d", *p)
+func TestRecipeMargin(t *testing.T) {
+	in := []store.RelationLeg{{ItemID: 139, Qty: 4}}
+	out := []store.RelationLeg{{ItemID: 2434, Qty: 3}}
+	snaps := map[int]*Snap{139: {Low: i64(6900)}, 2434: {High: i64(9500)}}
+	// Sell 3 x (9500 - 190) = 27930, buy 4 x 6900 = 27600.
+	if m, ok := RecipeMargin(in, out, snaps); !ok || m != 330 {
+		t.Errorf("margin %d ok=%v", m, ok)
+	}
+	if _, ok := RecipeMargin(in, []store.RelationLeg{{ItemID: 5, Qty: 1}}, snaps); ok {
+		t.Error("an unknown leg has no margin, not a partial one")
+	}
+	if _, ok := RecipeMargin(in, out, map[int]*Snap{139: {Low: i64(6900)}, 2434: {}}); ok {
+		t.Error("nulls are signal: an unpriced leg has no margin")
 	}
 }
