@@ -286,13 +286,13 @@ func (s *Store) laneYields(ctx context.Context) ([]LaneYield, []SourceYield, []F
 		l.Confirmed += c.Confirmed
 		l.EstRealizedGp += c.EstRealizedGp
 		if c.Lane == "C" && kind != nil {
-			name := "unlabelled"
+			name, famKind := "unlabelled", "" // a catch-all, so no one kind
 			if family != nil {
-				name = *family
+				name, famKind = *family, *kind
 			}
 			f := byFamily[name]
 			if f == nil {
-				f = &FamilyYield{Family: name, Kind: *kind}
+				f = &FamilyYield{Family: name, Kind: famKind}
 				byFamily[name] = f
 			}
 			f.add(c.yieldCounts)
@@ -328,7 +328,12 @@ func (s *Store) laneYields(ctx context.Context) ([]LaneYield, []SourceYield, []F
 		}
 		families = append(families, *f)
 	}
-	sort.Slice(families, func(i, j int) bool { return families[i].EstRealizedGp > families[j].EstRealizedGp })
+	sort.Slice(families, func(i, j int) bool {
+		if families[i].EstRealizedGp != families[j].EstRealizedGp {
+			return families[i].EstRealizedGp > families[j].EstRealizedGp
+		}
+		return families[i].Family < families[j].Family
+	})
 	return lanes, sources, families, nil
 }
 

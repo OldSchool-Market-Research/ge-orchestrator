@@ -42,6 +42,16 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	return s, nil
 }
 
+// Preflight fails boot when public is behind this binary. ge-data's DDL ships by
+// hand, and a missing column fails quietly later: calibration stops for every lane,
+// the vet's recipe gate goes dark and the sweep queues nothing, while runs stay green.
+func (s *Store) Preflight(ctx context.Context) error {
+	if _, err := s.Pool.Exec(ctx, `SELECT family FROM item_relations LIMIT 0`); err != nil {
+		return fmt.Errorf("item_relations.family (apply ge-data init/07 first): %w", err)
+	}
+	return nil
+}
+
 // migrate applies embedded migrations in filename order, tracked in
 // orchestrator.schema_version. The orchestrator role owns the schema, so DDL
 // is permitted there (and nowhere else).

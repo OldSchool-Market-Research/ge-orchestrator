@@ -199,7 +199,13 @@ func (s *Store) CalibrationLatest(ctx context.Context) ([]CalibrationRow, error)
 		return nil, err
 	}
 	best := map[string]CalibrationRow{}
+	staleBefore := time.Now().AddDate(0, 0, -CalWindowDays)
 	for _, r := range all {
+		// A family row refreshes only when that family closes, so one the record
+		// steered turns away from would otherwise freeze and outrank its kind's.
+		if IsFamilyKey(r.Archetype) && r.ComputedAt.Before(staleBefore) {
+			continue
+		}
 		cur, ok := best[r.Archetype]
 		switch {
 		case !ok:

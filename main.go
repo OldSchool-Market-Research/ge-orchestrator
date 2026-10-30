@@ -34,6 +34,9 @@ func main() {
 		log.Fatalf("db: %v", err)
 	}
 	defer st.Pool.Close()
+	if err := st.Preflight(ctx); err != nil {
+		log.Fatalf("db preflight: %v", err)
+	}
 	// C's realized gp and tick health changed meaning on 2026-10-30 (real 4h leg
 	// volume, freshness against each leg's own cadence), so its record restarts:
 	// old and new numbers must not blend in calibration or lane yields.

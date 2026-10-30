@@ -260,3 +260,43 @@ func TestAllocationFamilies(t *testing.T) {
 		t.Fatalf("families must round-trip: %+v %v", latest, err)
 	}
 }
+
+func TestCalibrationLatestDropsStaleFamilyRows(t *testing.T) {
+	dsn := os.Getenv("STORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("STORE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	if err := s.Preflight(ctx); err != nil {
+		t.Fatalf("preflight on a current schema: %v", err)
+	}
+	// family, fresh family, and a kind row: only the family row ages out
+	for _, row := range []struct {
+		key  string
+		days int
+	}{{"C:teststale", CalWindowDays + 1}, {"C:testfresh", 1}, {"C:set", CalWindowDays + 1}} {
+		if _, err := s.Pool.Exec(ctx, `INSERT INTO orchestrator.calibration
+			(computed_at, archetype, window_days, survive_hours, n_closed, n_survived, n_pace, factor, epoch)
+			VALUES (now() - make_interval(days => $1), $2, 14, 6, 10, 5, 0, 0.5, 1)`, row.days, row.key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.calibration
+		WHERE archetype IN ('C:teststale','C:testfresh') OR (archetype = 'C:set' AND factor = 0.5 AND n_closed = 10)`)
+	rows, err := s.CalibrationLatest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, r := range rows {
+		seen[r.Archetype] = true
+	}
+	if seen["C:teststale"] || !seen["C:testfresh"] || !seen["C:set"] {
+		t.Errorf("latest keys %v: want the fresh family and the old kind row, not the stale family", seen)
+	}
+}
