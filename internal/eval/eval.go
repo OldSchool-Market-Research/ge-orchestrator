@@ -339,6 +339,9 @@ func (ev *Evaluator) closeAndScore(ctx context.Context, st store.Strategy, state
 		}
 	}
 	ev.recalibrate(ctx, st.Archetype)
+	if st.Archetype == "C" {
+		ev.recalibrateFamily(ctx, st.RelationID)
+	}
 	return nil
 }
 

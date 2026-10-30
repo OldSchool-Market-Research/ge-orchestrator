@@ -218,9 +218,7 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 // constants can't live there and be shared). The calibration section uses
 // them to translate a factor into the raw claim it implies. C has no line here:
 // its calibrated floor is not enforced, and a raw-claim bar would throttle it by
-// instruction instead. C:combine reads pace 0 on a positive margin (a thin leg's
-// 30-minute volume can round its participation-capped conversions to 0), so its
-// 0.15 factor would imply a 1.33M bar on a kind that earned 35M in a fortnight.
+// instruction instead.
 const (
 	briefFloorFPerCycleGp = 400_000
 	briefFloorBPerCycleGp = 100_000
@@ -259,7 +257,7 @@ func trackAdvice(ratio float64, cal *store.CalibrationRow) string {
 }
 
 // calOrder sorts calibration rows for the brief: lanes in archetypeOrder, each
-// lane's blended row before its per-recipe-kind rows (C:combine, C:decant, ...).
+// lane's blended row, then its recipe kinds (C:combine, ...), then its families.
 func calOrder(cal []store.CalibrationRow) []store.CalibrationRow {
 	rank := func(key string) int {
 		lane, _, _ := strings.Cut(key, ":")
@@ -275,6 +273,9 @@ func calOrder(cal []store.CalibrationRow) []store.CalibrationRow {
 		if ri, rj := rank(out[i].Archetype), rank(out[j].Archetype); ri != rj {
 			return ri < rj
 		}
+		if fi, fj := store.IsFamilyKey(out[i].Archetype), store.IsFamilyKey(out[j].Archetype); fi != fj {
+			return fj
+		}
 		return out[i].Archetype < out[j].Archetype
 	})
 	return out
@@ -288,6 +289,11 @@ func writeCalibration(b *strings.Builder, cal []store.CalibrationRow, modes []st
 	fmt.Fprintf(b, "- EV_calibrated = factor x your claimed EV, where factor = p_survive (share of closed ships alive past %.0fh, trailing %dd) x pace_ratio (median realized/projected of those survivors). Lane F is vetoed when its calibrated EV is under the floor, so pre-filter F with it. Lane C is not: use its rows to choose where to spend turns, and never dismiss a conversion on its factor alone.\n",
 		store.CalSurviveHours, store.CalWindowDays)
 	for _, r := range calOrder(cal) {
+		// A family below its sample gate holds only the default factor; its kind's
+		// row says more, in fewer words.
+		if store.IsFamilyKey(r.Archetype) && r.PSurvive == nil && r.PaceRatio == nil {
+			continue
+		}
 		fmt.Fprintf(b, "- %s: factor %.2f = p_survive %s x pace %s.",
 			r.Archetype, r.Factor,
 			calComponent(r.PSurvive, fmt.Sprintf("%d of %d closed alive", r.NSurvived, r.NClosed), r.NClosed),

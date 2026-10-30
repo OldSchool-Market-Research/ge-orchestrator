@@ -88,6 +88,13 @@ func TestRecomputeCalibrationByRecipeKind(t *testing.T) {
 	check("C:set", 3, 2)
 	check("C:decant", 1, 0)
 	check("C:combine", 0, 0)
+	// A family counts only its own recipes (ge-data init/07).
+	var family string
+	if err := s.Pool.QueryRow(ctx, `SELECT family FROM public.item_relations WHERE relation_id=$1`, set).Scan(&family); err != nil {
+		t.Fatalf("relation %d has no family: %v", set, err)
+	}
+	check("C:"+family, 3, 2)
+	check("C:no-such-family", 0, 0)
 
 	latest, err := s.CalibrationLatest(ctx)
 	if err != nil {

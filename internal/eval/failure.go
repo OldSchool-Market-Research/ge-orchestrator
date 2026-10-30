@@ -91,4 +91,23 @@ func (ev *Evaluator) recalibrate(ctx context.Context, archetype string) {
 	}
 }
 
+// recalibrateFamily refreshes a closed conversion's family row. One row per close,
+// and only for that family: 18 families on every C close would swamp the history.
+func (ev *Evaluator) recalibrateFamily(ctx context.Context, relationID *int) {
+	if relationID == nil {
+		return
+	}
+	rel, err := ev.Store.RelationByID(ctx, *relationID)
+	if err != nil {
+		log.Printf("eval: recalibrate family, relation %d: %v", *relationID, err)
+		return
+	}
+	if rel == nil || rel.Family == nil {
+		return
+	}
+	if _, err := ev.Store.RecomputeCalibration(ctx, store.CalKey("C", *rel.Family)); err != nil {
+		log.Printf("eval: recalibrate family %s: %v", *rel.Family, err)
+	}
+}
+
 func strPtr(s string) *string { return &s }

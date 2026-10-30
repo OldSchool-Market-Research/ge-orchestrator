@@ -303,3 +303,11 @@ func TestOrphanRunningRunsReleasesSignals(t *testing.T) {
 		t.Fatalf("status %s run %v", status, run)
 	}
 }
+
+func TestIsFamilyKey(t *testing.T) {
+	for key, want := range map[string]bool{"C": false, "F": false, "C:set": false, "C:decant": false, "C:moon": true, "C:godsword": true} {
+		if got := IsFamilyKey(key); got != want {
+			t.Errorf("IsFamilyKey(%q) = %v", key, got)
+		}
+	}
+}

@@ -157,6 +157,20 @@ func TestRecordKindFactorFallsBackToLane(t *testing.T) {
 	if row := rec.CalRowFor(combine); row == nil || row.Archetype != "C" {
 		t.Errorf("combine row %+v", row)
 	}
+	// A measured family beats its kind; a thin one falls through to it.
+	rec.cal["C:moon"] = store.CalibrationRow{Archetype: "C:moon", Factor: 0.8, PSurvive: &measured}
+	rec.cal["C:robes"] = store.CalibrationRow{Archetype: "C:robes", Factor: 0.15}
+	moon := store.SidecarStrategy{Archetype: "C", RelationKind: "set", RelationFamily: "moon"}
+	robes := store.SidecarStrategy{Archetype: "C", RelationKind: "set", RelationFamily: "robes"}
+	if f := rec.FactorFor(moon); f != 0.8 {
+		t.Errorf("moon factor %v", f)
+	}
+	if f := rec.FactorFor(robes); f != 0.6 {
+		t.Errorf("a thin family falls back to its kind: %v", f)
+	}
+	if kind, family := relationLabels(nil); kind != "" || family != "" {
+		t.Errorf("no recipe, no labels: %q %q", kind, family)
+	}
 	var none *record
 	if f := none.FactorFor(set); f != 1 {
 		t.Errorf("nil record: %v", f)

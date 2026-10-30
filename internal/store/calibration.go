@@ -94,14 +94,30 @@ func calibrationFactor(pSurvive, paceRatio *float64) float64 {
 // combine or decant did, which one blended factor hid.
 var RelationKinds = []string{"set", "combine", "decant"}
 
-// CalKey is the calibration key for a lane and recipe kind: "C:set" for a
-// conversion whose kind is known, else the lane itself. Rows live in the same
-// archetype column, so the blended "C" row carries on alongside its parts.
-func CalKey(archetype, relKind string) string {
-	if archetype == "C" && relKind != "" {
-		return "C:" + relKind
+// CalKey is the calibration key for a lane and a recipe kind or family: "C:set"
+// or "C:moon" for a conversion, else the lane itself. Rows live in the same
+// archetype column, so the blended "C" row carries on alongside its parts. Family
+// slugs never equal a kind (ge-data init/07), so one key names one group.
+func CalKey(archetype, group string) string {
+	if archetype == "C" && group != "" {
+		return "C:" + group
 	}
 	return archetype
+}
+
+// IsFamilyKey reports whether a calibration key is a recipe family's, not a lane's
+// or a kind's.
+func IsFamilyKey(key string) bool {
+	_, group, ok := strings.Cut(key, ":")
+	if !ok {
+		return false
+	}
+	for _, kind := range RelationKinds {
+		if group == kind {
+			return false
+		}
+	}
+	return true
 }
 
 // RecomputeCalibration recomputes one calibration key's factors (a lane, or a
@@ -112,7 +128,7 @@ func CalKey(archetype, relKind string) string {
 // claim as legacy fallback) and counts only post-anchor ticks, mirroring
 // EvalStats.
 func (s *Store) RecomputeCalibration(ctx context.Context, key string) (*CalibrationRow, error) {
-	archetype, relKind, _ := strings.Cut(key, ":")
+	archetype, group, _ := strings.Cut(key, ":")
 	row := CalibrationRow{Archetype: key, WindowDays: CalWindowDays, SurviveHours: CalSurviveHours,
 		Epoch: s.EpochFor(archetype)}
 	var medPace *float64
@@ -129,7 +145,7 @@ func (s *Store) RecomputeCalibration(ctx context.Context, key string) (*Calibrat
 			  AND st.closed_at > now() - make_interval(days => $2)
 			  AND (st.archetype <> 'V' OR st.triggered_at IS NOT NULL)
 			  AND ($5 = '' OR EXISTS (SELECT 1 FROM public.item_relations r
-			                          WHERE r.relation_id = st.relation_id AND r.kind = $5))
+			                          WHERE r.relation_id = st.relation_id AND (r.kind = $5 OR r.family = $5)))
 		), pace AS (
 			SELECT (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY e.realized_per_1h_gp)
 			        FROM orchestrator.evaluations e
@@ -143,7 +159,7 @@ func (s *Store) RecomputeCalibration(ctx context.Context, key string) (*Calibrat
 		       (SELECT count(*) FROM pace WHERE ratio IS NOT NULL),
 		       (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY ratio)::float8
 		        FROM pace WHERE ratio IS NOT NULL)`,
-		archetype, CalWindowDays, CalSurviveHours, row.Epoch, relKind).
+		archetype, CalWindowDays, CalSurviveHours, row.Epoch, group).
 		Scan(&row.NClosed, &row.NSurvived, &row.NPace, &medPace)
 	if err != nil {
 		return nil, err
@@ -183,7 +199,15 @@ func (s *Store) CalibrationLatest(ctx context.Context) ([]CalibrationRow, error)
 		return nil, err
 	}
 	best := map[string]CalibrationRow{}
+	staleBefore := time.Now().AddDate(0, 0, -CalWindowDays)
 	for _, r := range all {
+		// A family row refreshes only when that family closes, so one the record
+		// steered turns away from would otherwise freeze and outrank its kind's, and
+		// one from before a cut would outrank the new regime's. No family row at the
+		// current epoch just means the strategy falls through to its kind.
+		if IsFamilyKey(r.Archetype) && (r.ComputedAt.Before(staleBefore) || r.Epoch != s.EpochFor(r.Archetype)) {
+			continue
+		}
 		cur, ok := best[r.Archetype]
 		switch {
 		case !ok:

@@ -160,6 +160,9 @@ func TestProvenanceAllocationRegime(t *testing.T) {
 	if f == nil || f.Pitched < 4 || f.Closed < 1 || f.Survived < 1 || f.Target != nil {
 		t.Errorf("F yield %+v (the sample gate holds its target back)", f)
 	}
+	if first.Families == nil {
+		t.Error("families must be an empty list, not null")
+	}
 	var sawSource bool
 	for _, src := range first.Sources {
 		if src.Lane == "F" && src.Source == "vflip" && src.Closed >= 1 {
@@ -192,5 +195,117 @@ func TestProvenanceAllocationRegime(t *testing.T) {
 	}
 	if hist, err := s.RegimeHistory(ctx, 1); err != nil || len(hist) != 1 {
 		t.Fatalf("regime history %+v: %v", hist, err)
+	}
+}
+
+// TestAllocationFamilies checks C's family yields, including a recipe ge-data hasn't
+// labelled. Needs a scratch DB with ge-data's init/07 applied: set STORE_TEST_DSN.
+func TestAllocationFamilies(t *testing.T) {
+	dsn := os.Getenv("STORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("STORE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	if _, err := s.OrphanRunningRuns(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer s.OrphanRunningRuns(ctx)
+	runID, err := s.CreateRun(ctx, json.RawMessage(`{}`), "test brief", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.lane_allocation`)
+	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.strategies WHERE run_id=$1`, runID)
+	var relID int
+	var family string
+	if err := s.Pool.QueryRow(ctx, `SELECT relation_id, family FROM public.item_relations WHERE family='moon' LIMIT 1`).Scan(&relID, &family); err != nil {
+		t.Skipf("no labelled recipes in this DB: %v", err)
+	}
+	var st SidecarStrategy
+	raw := fmt.Sprintf(`{"id":"C-family-test","archetype":"C","title":"t","thesis":"t",
+		"items":[{"name":"x","id":876590}],"entry":"e","exit":"x","entry_price":1,"exit_price":2,
+		"horizon":"h","capital_required":1,"size":{"buy_limit":1,"vol_constrained":1,"units_used":1},
+		"expected_value":{"per_cycle_gp":1,"per_1h_gp":1,"per_day_gp":1,"roi_pct":1},
+		"confidence":"medium","invalidation":"i",
+		"legs":[{"item_id":876590,"name":"x","side":"sell","qty":1,"price":2}],"relation_id":%d}`, relID)
+	if err := json.Unmarshal([]byte(raw), &st); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertStrategies(ctx, runID, time.Now().UTC().Add(-7*time.Hour), []SidecarStrategy{st}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx, `UPDATE orchestrator.strategies SET state='killed', closed_at=now() WHERE run_id=$1`, runID); err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.CompileAllocation(ctx, map[string]float64{"C": 1.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *FamilyYield
+	for i := range a.Families {
+		if a.Families[i].Family == family {
+			got = &a.Families[i]
+		}
+	}
+	if got == nil || got.Kind != "set" || got.Closed < 1 || got.Survived < 1 || got.PerShipGp == nil {
+		t.Fatalf("families %+v", a.Families)
+	}
+	latest, err := s.LatestAllocation(ctx)
+	if err != nil || latest == nil || len(latest.Families) != len(a.Families) {
+		t.Fatalf("families must round-trip: %+v %v", latest, err)
+	}
+}
+
+func TestCalibrationLatestDropsStaleFamilyRows(t *testing.T) {
+	dsn := os.Getenv("STORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("STORE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	if err := s.Preflight(ctx); err != nil {
+		t.Fatalf("preflight on a current schema: %v", err)
+	}
+	// family, fresh family, and a kind row: only the family row ages out
+	for _, row := range []struct {
+		key  string
+		days int
+	}{{"C:teststale", CalWindowDays + 1}, {"C:testfresh", 1}, {"C:set", CalWindowDays + 1}} {
+		if _, err := s.Pool.Exec(ctx, `INSERT INTO orchestrator.calibration
+			(computed_at, archetype, window_days, survive_hours, n_closed, n_survived, n_pace, factor, epoch)
+			VALUES (now() - make_interval(days => $1), $2, 14, 6, 10, 5, 0, 0.5, 1)`, row.days, row.key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.calibration
+		WHERE archetype IN ('C:teststale','C:testfresh') OR (archetype = 'C:set' AND factor = 0.5 AND n_closed = 10)`)
+	keys := func() map[string]bool {
+		rows, err := s.CalibrationLatest(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, r := range rows {
+			seen[r.Archetype] = true
+		}
+		return seen
+	}
+	if seen := keys(); seen["C:teststale"] || !seen["C:testfresh"] || !seen["C:set"] {
+		t.Errorf("latest keys %v: want the fresh family and the old kind row, not the stale family", seen)
+	}
+	// After a cut, a fresh family row from the old epoch must not outrank the new
+	// regime's kind row. Those rows are at epoch 1, so epoch 2 is the cut here.
+	s.Epochs = map[string]int{"C": 2}
+	if seen := keys(); seen["C:testfresh"] {
+		t.Errorf("latest keys %v: a family row from before the cut must not survive it", seen)
 	}
 }

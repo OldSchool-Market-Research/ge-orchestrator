@@ -71,11 +71,11 @@ type SidecarStrategy struct {
 		BuyLimit *int64 `json:"buy_limit"`
 		Members  *bool  `json:"members"`
 	} `json:"items"`
-	Entry           string `json:"entry"`
-	Exit            string `json:"exit"`
-	EntryPrice      int64  `json:"entry_price"`
-	ExitPrice       int64  `json:"exit_price"`
-	KillPrice       *int64 `json:"kill_price"`
+	Entry           string         `json:"entry"`
+	Exit            string         `json:"exit"`
+	EntryPrice      int64          `json:"entry_price"`
+	ExitPrice       int64          `json:"exit_price"`
+	KillPrice       *int64         `json:"kill_price"`
 	Horizon         string         `json:"horizon"`
 	Attention       string         `json:"attention,omitempty"`      // F/B execution contract
 	AttentionSpec   *AttentionSpec `json:"attention_spec,omitempty"` // F/B contract as numbers (agent >= 0.7.0)
@@ -115,6 +115,8 @@ type SidecarStrategy struct {
 	// RelationKind is set by the vetter, never by the sidecar JSON: the
 	// cited recipe's kind, which picks a conversion's calibration row.
 	RelationKind string `json:"-"`
+	// RelationFamily likewise: the recipe's sub-type, "" when unlabelled.
+	RelationFamily string `json:"-"`
 
 	// Provenance, set by the runner at ingest (store.AttachProvenance).
 	SourceSignalID *int64   `json:"-"`
@@ -292,21 +294,21 @@ type Strategy struct {
 	RoiPct        *float64        `json:"roi_pct"`
 	// ProjectedPer1hGp is the harness's own ship-time projection (null on
 	// legacy rows and non-F kinds); the confirm ratio divides by it when set.
-	ProjectedPer1hGp *int64 `json:"projected_per_1h_gp"`
-	Confidence    string          `json:"confidence"`
-	ConfidenceWhy *string         `json:"confidence_why"`
-	Invalidation  string          `json:"invalidation"`
-	Risks         json.RawMessage `json:"risks"`
-	PaperTrade    *string         `json:"paper_trade"`
-	State         string          `json:"state"`
-	StateReason   *string         `json:"state_reason"`
-	FailureMode   *string         `json:"failure_mode,omitempty"`
-	EvalEpoch     int             `json:"eval_epoch"`
-	SourceSignalID *int64          `json:"source_signal_id,omitempty"`
-	SourceLens    *string         `json:"source_lens,omitempty"`
-	ScreenHits    []string        `json:"screen_hits,omitempty"`
-	OpenedAt      time.Time       `json:"opened_at"`
-	ClosedAt      *time.Time      `json:"closed_at"`
+	ProjectedPer1hGp *int64          `json:"projected_per_1h_gp"`
+	Confidence       string          `json:"confidence"`
+	ConfidenceWhy    *string         `json:"confidence_why"`
+	Invalidation     string          `json:"invalidation"`
+	Risks            json.RawMessage `json:"risks"`
+	PaperTrade       *string         `json:"paper_trade"`
+	State            string          `json:"state"`
+	StateReason      *string         `json:"state_reason"`
+	FailureMode      *string         `json:"failure_mode,omitempty"`
+	EvalEpoch        int             `json:"eval_epoch"`
+	SourceSignalID   *int64          `json:"source_signal_id,omitempty"`
+	SourceLens       *string         `json:"source_lens,omitempty"`
+	ScreenHits       []string        `json:"screen_hits,omitempty"`
+	OpenedAt         time.Time       `json:"opened_at"`
+	ClosedAt         *time.Time      `json:"closed_at"`
 
 	EvalWindow  time.Duration `json:"-"`
 	EvalWindowS float64       `json:"eval_window_s"`

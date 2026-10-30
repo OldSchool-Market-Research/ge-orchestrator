@@ -656,10 +656,10 @@ func (c *Collector) sweepHighValue(ctx context.Context, asOf time.Time) int {
 
 const comboSweepSQL = `
 WITH dirs AS (
-  SELECT relation_id, name, kind, 'forward' AS direction, inputs AS buys, outputs AS sells
+  SELECT relation_id, name, kind, family, 'forward' AS direction, inputs AS buys, outputs AS sells
   FROM item_relations
   UNION ALL
-  SELECT relation_id, name, kind, 'reverse', outputs, inputs
+  SELECT relation_id, name, kind, family, 'reverse', outputs, inputs
   FROM item_relations WHERE reversible
 ),
 legs AS (
@@ -697,7 +697,7 @@ priced AS (
   LEFT JOIN vol4 v USING (item_id)
   GROUP BY 1, 2
 )
-SELECT d.relation_id, d.name, d.kind, d.direction,
+SELECT d.relation_id, d.name, d.kind, d.family, d.direction,
        (d.sells->0->>'item_id')::int AS primary_item_id,
        i.name AS primary_item_name,
        p.combo_margin, p.input_cost,
@@ -721,21 +721,22 @@ func (c *Collector) sweepCombo(ctx context.Context, asOf time.Time) int {
 	}
 	defer rows.Close()
 	type comboRow struct {
-		RelationID    int    `json:"relation_id"`
-		Relation      string `json:"relation"`
-		Kind          string `json:"kind"`
-		Direction     string `json:"direction"`
-		PrimaryItemID int    `json:"primary_item_id"`
-		PrimaryName   string `json:"primary_item_name"`
-		ComboMargin   int64  `json:"combo_margin"`
-		InputCost     int64  `json:"input_cost"`
-		Conversions4h int64  `json:"conversions_4h"`
-		BudgetCycleGp int64  `json:"budget_cycle_gp"`
+		RelationID    int     `json:"relation_id"`
+		Relation      string  `json:"relation"`
+		Kind          string  `json:"kind"`
+		Family        *string `json:"family,omitempty"`
+		Direction     string  `json:"direction"`
+		PrimaryItemID int     `json:"primary_item_id"`
+		PrimaryName   string  `json:"primary_item_name"`
+		ComboMargin   int64   `json:"combo_margin"`
+		InputCost     int64   `json:"input_cost"`
+		Conversions4h int64   `json:"conversions_4h"`
+		BudgetCycleGp int64   `json:"budget_cycle_gp"`
 	}
 	var parsed []comboRow
 	for rows.Next() {
 		var r comboRow
-		if err := rows.Scan(&r.RelationID, &r.Relation, &r.Kind, &r.Direction,
+		if err := rows.Scan(&r.RelationID, &r.Relation, &r.Kind, &r.Family, &r.Direction,
 			&r.PrimaryItemID, &r.PrimaryName, &r.ComboMargin, &r.InputCost,
 			&r.Conversions4h, &r.BudgetCycleGp); err != nil {
 			log.Printf("collect: combo scan: %v", err)

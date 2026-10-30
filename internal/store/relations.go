@@ -19,7 +19,8 @@ type RelationLeg struct {
 // the orchestrator's grant is SELECT-only.
 type Relation struct {
 	RelationID int
-	Kind       string // decant | set | combine
+	Kind       string  // decant | set | combine
+	Family     *string // sub-type finer than Kind (moon, godsword, ...); nil = unlabelled
 	Name       string
 	Reversible bool
 	Inputs     []RelationLeg
@@ -31,9 +32,9 @@ type Relation struct {
 func (s *Store) RelationByID(ctx context.Context, id int) (*Relation, error) {
 	var rel Relation
 	var inputs, outputs []byte
-	err := s.Pool.QueryRow(ctx, `SELECT relation_id, kind, name, reversible, inputs, outputs
+	err := s.Pool.QueryRow(ctx, `SELECT relation_id, kind, family, name, reversible, inputs, outputs
 		FROM item_relations WHERE relation_id = $1`, id).
-		Scan(&rel.RelationID, &rel.Kind, &rel.Name, &rel.Reversible, &inputs, &outputs)
+		Scan(&rel.RelationID, &rel.Kind, &rel.Family, &rel.Name, &rel.Reversible, &inputs, &outputs)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
