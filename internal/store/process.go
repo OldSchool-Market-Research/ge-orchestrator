@@ -237,6 +237,7 @@ type ProcessTopRow struct {
 	PctHoursPositive *float64 `json:"pct_hours_positive"`
 	HoursInTop10     int64    `json:"hours_in_top10"`
 	AvgLast24h       *float64 `json:"avg_last_24h"`
+	UnknownLimitLegs int64    `json:"unknown_limit_legs"` // latest hour; over 0, the rate ignores a limit nobody knows
 }
 
 // processTopMetrics is the closed set of snapshot columns ProcessTop may rank
@@ -255,7 +256,7 @@ func (s *Store) ProcessTop(ctx context.Context, metric string, since time.Time, 
 	}
 	rows, err := s.Pool.Query(ctx, `
 		WITH s AS (
-		  SELECT recipe_id, ts, margin_slow, `+metric+` AS v,
+		  SELECT recipe_id, ts, margin_slow, unknown_limit_legs, `+metric+` AS v,
 		         rank() OVER (PARTITION BY ts ORDER BY `+metric+` DESC NULLS LAST) AS rk
 		  FROM process_snapshots WHERE ts >= $1
 		)
@@ -265,11 +266,12 @@ func (s *Store) ProcessTop(ctx context.Context, metric string, since time.Time, 
 		       round(percentile_cont(0.25) WITHIN GROUP (ORDER BY s.v)::numeric),
 		       round(100.0 * count(*) FILTER (WHERE s.v > 0) / count(*), 1),
 		       count(*) FILTER (WHERE s.rk <= 10 AND s.v IS NOT NULL),
-		       round(avg(s.v) FILTER (WHERE s.ts >= now() - interval '24 hours'))
+		       round(avg(s.v) FILTER (WHERE s.ts >= now() - interval '24 hours')),
+		       (array_agg(s.unknown_limit_legs ORDER BY s.ts DESC))[1]
 		FROM s JOIN process_recipes p USING (recipe_id)
 		GROUP BY s.recipe_id, p.name, p.category
 		HAVING count(s.v) >= $3::numeric / 100 * count(*)
-		ORDER BY median DESC NULLS LAST, s.recipe_id
+		ORDER BY (array_agg(s.unknown_limit_legs ORDER BY s.ts DESC))[1] > 0, median DESC NULLS LAST, s.recipe_id
 		LIMIT $2`, since, limit, minCoveragePct)
 	if err != nil {
 		return nil, processErr(err)
@@ -279,7 +281,7 @@ func (s *Store) ProcessTop(ctx context.Context, metric string, since time.Time, 
 	for rows.Next() {
 		var r ProcessTopRow
 		if err := rows.Scan(&r.RecipeID, &r.Name, &r.Category, &r.Hours, &r.PricedHours, &r.MetricHours, &r.Avg, &r.Median,
-			&r.P25, &r.PctHoursPositive, &r.HoursInTop10, &r.AvgLast24h); err != nil {
+			&r.P25, &r.PctHoursPositive, &r.HoursInTop10, &r.AvgLast24h, &r.UnknownLimitLegs); err != nil {
 			return nil, processErr(err)
 		}
 		out = append(out, r)

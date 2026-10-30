@@ -25,8 +25,8 @@ import (
 // times the buy limit, capped at a sixth of the thinner side's 24h volume
 // (all of an average 4h window; the harness itself assumes ~15% of it), so
 // a Zamorak hilt trading 9 a day doesn't claim 10,000. It is null, not 0,
-// when the buy limit is unknown (the ingester stores a missing /mapping
-// limit as 0) or the thinner side shows no 24h volume.
+// when the buy limit is unknown (NULL, or 0 for the two items /mapping lists
+// at 0) or the thinner side shows no 24h volume.
 
 // ItemRow is one item with its latest quote (last 14 days) and 24h volume.
 type ItemRow struct {
