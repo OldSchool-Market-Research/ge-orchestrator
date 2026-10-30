@@ -197,7 +197,7 @@ func TestLanePStorage(t *testing.T) {
 	if a.Weights["P"] != 1 {
 		t.Errorf("P's weight holds: %v", a.Weights)
 	}
-	if _, _, err := s.ProcessPersistence(ctx, 16); err != nil {
+	if _, _, err := s.ProcessPersistence(ctx, 16, 250_000); err != nil {
 		t.Errorf("persistence: %v", err)
 	}
 	s.Pool.Exec(ctx, `DELETE FROM orchestrator.lane_allocation`)

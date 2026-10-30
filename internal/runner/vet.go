@@ -392,12 +392,13 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 	return "", proj
 }
 
-// processMinHours and processMinPositive are lane P's persistence gate: at least 12
-// hourly snapshots in the last 24h, at least 80% of them paying. The view's gp_hr
-// can be one good hour; ge-data snapshots every recipe hourly.
+// processMinHours and processMinAtFloor are lane P's persistence gate: at least 12
+// hourly snapshots in the last 24h, at least 80% of them at the floor. The view's
+// gp_hr can be one good hour, and it's an upper bound on the honest number, so merely
+// positive would let a spike through; ge-data snapshots every recipe hourly.
 const (
-	processMinHours    = 12
-	processMinPositive = 0.8
+	processMinHours   = 12
+	processMinAtFloor = 0.8
 )
 
 // vetProcess applies lane P's ship-time rules and returns the harness projection.
@@ -422,10 +423,17 @@ func (r *Runner) vetProcess(ctx context.Context, st store.SidecarStrategy) (stri
 	if reason := processVeto(snap, proj); reason != "" {
 		return reason, nil
 	}
-	positive, total, err := r.Store.ProcessPersistence(ctx, *st.RecipeID)
+	// The dedup, the graveyard, the board and the pings all key on items[0]. A recipe's
+	// first leg can be a shared input like a nature rune, which would falsely veto
+	// every other recipe using it.
+	if snap.OutputItem != nil && st.PrimaryItemID() != *snap.OutputItem {
+		return fmt.Sprintf("vetoed at ship time: items[0] must be recipe %d's main output, item %d (process_quote: meta.harness.output_item)",
+			*st.RecipeID, *snap.OutputItem), nil
+	}
+	atFloor, total, err := r.Store.ProcessPersistence(ctx, *st.RecipeID, eval.FloorPGpHr)
 	if err != nil {
 		log.Printf("vet %s: recipe %d persistence: %v", st.ID, *st.RecipeID, err)
-	} else if reason := processPersistenceVeto(positive, total); reason != "" {
+	} else if reason := processPersistenceVeto(atFloor, total); reason != "" {
 		return reason, nil
 	}
 	return "", proj
@@ -442,6 +450,8 @@ func processVeto(s *eval.ProcessSnap, proj *int64) string {
 		return "vetoed at ship time: this recipe has no known rate, so the harness can't size it"
 	case s.UnknownLimitLegs > 0:
 		return "vetoed at ship time: a leg of this recipe has no known buy limit"
+	case s.Stale():
+		return "vetoed at ship time: a leg of this recipe hasn't traded in over 6h, so its price can't be trusted"
 	case proj == nil:
 		return "vetoed at ship time: this recipe doesn't earn at the harness's prices, or a leg has no price right now"
 	case *proj < eval.FloorPGpHr:
@@ -450,12 +460,12 @@ func processVeto(s *eval.ProcessSnap, proj *int64) string {
 	return ""
 }
 
-func processPersistenceVeto(positive, total int) string {
+func processPersistenceVeto(atFloor, total int) string {
 	if total < processMinHours {
 		return fmt.Sprintf("vetoed at ship time: only %d hourly snapshots in the last 24h, under the %d the lane-P gate needs", total, processMinHours)
 	}
-	if float64(positive) < processMinPositive*float64(total) {
-		return fmt.Sprintf("vetoed at ship time: paid in only %d of the last %d hourly snapshots, under the lane-P gate of %.0f%%", positive, total, 100*processMinPositive)
+	if float64(atFloor) < processMinAtFloor*float64(total) {
+		return fmt.Sprintf("vetoed at ship time: read at the floor in only %d of the last %d hourly snapshots, under the lane-P gate of %.0f%%", atFloor, total, 100*processMinAtFloor)
 	}
 	return ""
 }
@@ -475,6 +485,10 @@ func (rec *record) graveEntry(itemID int, archetype string) (store.GraveyardRow,
 func graveyardVeto(g store.GraveyardRow, cooldown time.Duration, now time.Time) string {
 	if cooldown <= 0 || now.Sub(g.LastKilledAt) >= cooldown {
 		return ""
+	}
+	if g.Archetype == "P" { // realized is a pace there, not gp
+		return fmt.Sprintf("vetoed at ship time: item %d [P] is graveyarded — %d kills in the trailing %dd, last killed %s (cooldown %s; a materially new signal class means a different archetype)",
+			g.ItemID, g.Kills, store.GraveyardWindowDays, g.LastKilledAt.Format("2006-01-02"), cooldown)
 	}
 	return fmt.Sprintf("vetoed at ship time: item %d [%s] is graveyarded — %d kills, %d gp realized in the trailing %dd, last killed %s (cooldown %s; a materially new signal class means a different archetype)",
 		g.ItemID, g.Archetype, g.Kills, g.EstRealizedGp, store.GraveyardWindowDays,

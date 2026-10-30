@@ -44,9 +44,10 @@ func New(cfg Config) *Notifier {
 // silent forever, which trains the operator to stop trusting the silence.
 // Below sample, the harness projection (already haircut for slippage and
 // participation) is the honest gate, and the ping body says so.
-// Kinds without an attention contract (V/U) never ping — the bar is about
+// Kinds without an attention contract (V/U/P) never ping — the bar is about
 // fitting trades into the operator's day, and those kinds carry no cadence
-// to judge. F, B and C all carry attention_spec (agent >= 0.7.0).
+// to judge. For P that's deliberate: it's hands-on play, on the board until a
+// confirm proves it. F, B and C all carry attention_spec (agent >= 0.7.0).
 func (n *Notifier) Clears(st store.SidecarStrategy, cal *store.CalibrationRow) (per1h int64, calibrated, ok bool) {
 	per1h = st.ExpectedValue.Per1hGp
 	if st.HarnessProjectedPer1h != nil {
@@ -93,6 +94,14 @@ func (n *Notifier) StrategyConfirmed(ctx context.Context, st store.Strategy, rea
 		fmt.Sprintf("%s: %s", st.Sid, st.Title),
 		fmt.Sprintf("buy %d -> sell %d", st.EntryPrice, st.ExitPrice),
 		fmt.Sprintf("survived its full window; realized %s gp/hr (haircut)", gp(realizedPer1h)),
+	}
+	if st.Archetype == "P" { // hands-on: a pace while playing, not money arriving
+		title = fmt.Sprintf("GE CONFIRMED: %s - %s gp per hour of play", name, gp(realizedPer1h))
+		lines = []string{
+			fmt.Sprintf("%s: %s", st.Sid, st.Title),
+			fmt.Sprintf("per action: buy %d -> sell %d", st.EntryPrice, st.ExitPrice),
+			fmt.Sprintf("held up for its full window; pays %s per hour of play (haircut)", gp(realizedPer1h)),
+		}
 	}
 	if st.AttentionSpec != nil {
 		lines = append(lines, fmt.Sprintf("attention: %.1f checks/hr, safe unattended %.0fh",

@@ -52,7 +52,7 @@ func (s *Store) Graveyard(ctx context.Context) ([]GraveyardRow, error) {
 			  AND s.closed_at > now() - make_interval(days => $1)
 			GROUP BY s.primary_item_id, s.archetype
 		) g
-		WHERE g.kills >= $2 AND g.est_realized < 0
+		WHERE g.kills >= $2 AND (g.est_realized < 0 OR g.archetype = 'P')
 		ORDER BY g.est_realized`, GraveyardWindowDays, GraveyardMinKills)
 	if err != nil {
 		return nil, err

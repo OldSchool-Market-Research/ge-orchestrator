@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -17,10 +18,11 @@ type fakeSource struct {
 	zN      int
 	zMove   *float64
 	process *ProcessSnap
+	procErr error
 }
 
 func (f *fakeSource) ProcessSnapshot(_ context.Context, _ int) (*ProcessSnap, error) {
-	return f.process, nil
+	return f.process, f.procErr
 }
 
 func (f *fakeSource) Snapshot(_ context.Context, id int) (*Snap, error) { return f.snaps[id], nil }
@@ -662,5 +664,49 @@ func TestComputeProcess(t *testing.T) {
 	e, checks := run(s)
 	if e.Verdict != "degraded" || e.RealizedPer1hGp != nil || checks["legs_priced"] {
 		t.Errorf("unpriced: %s %v %v", e.Verdict, e.RealizedPer1hGp, checks)
+	}
+	// A stale leg can inflate the margin, so it neither reads healthy nor kills.
+	s = pSnap(900, 1000, 2000, 1600, 550, 5930)
+	age := int64(legFreshMaxAgeS + 1)
+	s.MaxLegAgeS = &age
+	e, checks = run(s)
+	if e.Verdict != "degraded" || e.RealizedPer1hGp != nil || e.CurMargin != nil || checks["legs_fresh"] {
+		t.Errorf("stale: %s %v %v", e.Verdict, e.RealizedPer1hGp, checks)
+	}
+	s = pSnap(10, 1000, 2000, 1600, 550, 5930)
+	s.MaxLegAgeS = &age
+	if e, checks := run(s); e.Verdict != "degraded" || !checks["floor_ok"] {
+		t.Errorf("a stale leg must not kill: %s %v", e.Verdict, checks)
+	}
+	// Live margin is stored per action, so the board reads it like any lane.
+	if e, _ := run(pSnap(900, 1000, 2000, 1600, 550, 5930)); e.CurMargin == nil || *e.CurMargin != 885 {
+		t.Errorf("cur margin: %v", e.CurMargin)
+	}
+}
+
+// A recipe the seed dropped reads as unpriced, so the window can expire the strategy.
+func TestComputeProcessMissingRecipe(t *testing.T) {
+	src := &fakeSource{procErr: ErrRecipeNotFound}
+	e, checks, err := fixedEvaluator(src, tue1200).computeProcess(context.Background(), processStrategy(2200))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Verdict != "degraded" || e.RealizedPer1hGp != nil || checks["legs_priced"] {
+		t.Errorf("%s %v %v", e.Verdict, e.RealizedPer1hGp, checks)
+	}
+	src.procErr = errors.New("db down")
+	if _, _, err := fixedEvaluator(src, tue1200).computeProcess(context.Background(), processStrategy(2200)); err == nil {
+		t.Error("a real lookup failure must stay an error, not a tick")
+	}
+}
+
+// P's realized is a pace per hour of play: no factor, and a confirm needs the floor.
+func TestProcessIsNotCalibrated(t *testing.T) {
+	(&Evaluator{}).recalibrate(context.Background(), "P") // a nil Store panics if it tries
+	if got := policyFor("P").ConfirmMinPer1hGp; got != FloorPGpHr {
+		t.Errorf("confirm bar %d", got)
+	}
+	if got := policyFor("F").ConfirmMinPer1hGp; got != 0 {
+		t.Errorf("other lanes keep their ratio alone: %d", got)
 	}
 }

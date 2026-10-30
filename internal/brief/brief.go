@@ -181,7 +181,11 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 			closed := r.N - r.Open - r.Armed
 			line := fmt.Sprintf("- %s: n=%d (%d open, %d armed)", r.Archetype, r.N, r.Open, r.Armed)
 			if r.Vetoed > 0 {
-				line += fmt.Sprintf(", %d vetoed at ship time — check kill_price and capital against a live quote, and that units_used x entry_price matches capital_required, before shipping", r.Vetoed)
+				if r.Archetype == "P" {
+					line += fmt.Sprintf(", %d vetoed at ship time — run process_quote last and check meta.harness says shippable, and that items[0] is its output_item, before shipping", r.Vetoed)
+				} else {
+					line += fmt.Sprintf(", %d vetoed at ship time — check kill_price and capital against a live quote, and that units_used x entry_price matches capital_required, before shipping", r.Vetoed)
+				}
 			}
 			if closed > 0 {
 				surv := float64(r.Confirmed) / float64(closed) * 100
@@ -361,6 +365,11 @@ func writeGraveyard(b *strings.Builder, rows []store.GraveyardRow) {
 		if i == maxLines {
 			fmt.Fprintf(b, "- …and %d more.\n", len(rows)-maxLines)
 			break
+		}
+		if r.Archetype == "P" { // realized is a pace there, not gp
+			fmt.Fprintf(b, "- %s [P] (item_id %d): %d kills, last killed %s\n",
+				r.ItemName, r.ItemID, r.Kills, r.LastKilledAt.Format("01-02"))
+			continue
 		}
 		fmt.Fprintf(b, "- %s [%s] (item_id %d): %d kills, %s gp realized, last killed %s\n",
 			r.ItemName, r.Archetype, r.ItemID, r.Kills, group(r.EstRealizedGp), r.LastKilledAt.Format("01-02"))

@@ -33,7 +33,16 @@ type ProcessSnap struct {
 	MarketRate       *float64 // the market's 24h volume
 	Throughput       string
 	UnknownLimitLegs int64
-	Linked           bool // the same conversion as a C relation
+	Linked           bool   // the same conversion as a C relation
+	MaxLegAgeS       *int64 // the oldest leg's last trade
+	OutputItem       *int   // the most-made sell leg: what a strategy names first
+}
+
+// Stale reports a leg too old to trust. An old high inflates the margin, so a recipe
+// on one can't read healthy, or ship. Lane C's cap, without its per-leg cadence: the
+// view reports only the oldest leg's age.
+func (s *ProcessSnap) Stale() bool {
+	return s != nil && s.MaxLegAgeS != nil && *s.MaxLegAgeS > legFreshMaxAgeS
 }
 
 // ErrRecipeNotFound means no process_recipes row has that id.
@@ -80,20 +89,26 @@ func (ev *Evaluator) computeProcess(ctx context.Context, st store.Strategy) (sto
 	if st.RecipeID == nil {
 		return store.Evaluation{}, nil, fmt.Errorf("strategy %s: no recipe_id", st.Sid)
 	}
+	// A recipe the seed has since dropped reads as unpriceable, so the window can still
+	// expire the strategy. Returning the error would leave it open forever, blocking
+	// its item.
 	snap, err := ev.source().ProcessSnapshot(ctx, *st.RecipeID)
-	if err != nil {
+	missing := errors.Is(err, ErrRecipeNotFound)
+	if err != nil && !missing {
 		return store.Evaluation{}, nil, err
 	}
 	units := int64(0)
 	if st.UnitsUsed != nil {
 		units = *st.UnitsUsed
 	}
-	margin, rate, gpHr, ok := ev.processHonest(snap, units)
+	margin, rate, gpHr, priced := ev.processHonest(snap, units)
+	fresh := !snap.Stale()
+	ok := priced && fresh
 	killBar := processKillFraction * FloorPGpHr
 
-	checks := map[string]bool{"legs_priced": ok}
-	// A missing leg is a freshness problem, not a floor breach: only a live margin
-	// can fail this check, as in computeFlip.
+	checks := map[string]bool{"legs_priced": priced, "legs_fresh": fresh}
+	// A missing or stale leg is a freshness problem, not a floor breach: only a live
+	// margin can fail this check, as in computeFlip.
 	checks["floor_ok"] = !ok || gpHr >= killBar
 
 	verdict := "healthy"
@@ -105,6 +120,9 @@ func (ev *Evaluator) computeProcess(ctx context.Context, st store.Strategy) (sto
 	}
 	e := baseEvaluation(st, ev.now(), nil)
 	detail := map[string]any{"kill_bar_gp_hr": killBar}
+	if missing {
+		detail["recipe_missing"] = true
+	}
 	if ok {
 		realized := int64(gpHr)
 		e.RealizedPer1hGp = &realized
@@ -120,12 +138,14 @@ func (ev *Evaluator) computeProcess(ctx context.Context, st store.Strategy) (sto
 const processSnapshotSQL = `
 WITH l AS (
   SELECT sum(CASE WHEN side = 'buy' THEN qty * low END)::float8 AS gross_in,
-         sum(CASE WHEN side = 'sell' THEN qty * high END)::float8 AS gross_out
+         sum(CASE WHEN side = 'sell' THEN qty * high END)::float8 AS gross_out,
+         (array_agg(item_id ORDER BY qty DESC, item_id) FILTER (WHERE side = 'sell'))[1] AS output_item
   FROM process_legs_now WHERE recipe_id = $1
 )
 SELECT q.margin_slow::float8, l.gross_in, l.gross_out, q.actions_per_hour::float8,
        q.limit_actions_per_hour::float8, q.market_actions_per_hour::float8,
-       q.throughput, q.unknown_limit_legs, r.relation_name IS NOT NULL
+       q.throughput, q.unknown_limit_legs, r.relation_name IS NOT NULL,
+       q.max_leg_age_s, l.output_item
 FROM process_quotes_now q
 JOIN process_recipes r USING (recipe_id)
 CROSS JOIN l
@@ -134,7 +154,8 @@ WHERE q.recipe_id = $1`
 func (p *pgSource) ProcessSnapshot(ctx context.Context, recipeID int) (*ProcessSnap, error) {
 	var s ProcessSnap
 	err := p.pool.QueryRow(ctx, processSnapshotSQL, recipeID).Scan(&s.MarginSlow, &s.GrossIn, &s.GrossOut,
-		&s.ActionsPerHour, &s.LimitRate, &s.MarketRate, &s.Throughput, &s.UnknownLimitLegs, &s.Linked)
+		&s.ActionsPerHour, &s.LimitRate, &s.MarketRate, &s.Throughput, &s.UnknownLimitLegs, &s.Linked,
+		&s.MaxLegAgeS, &s.OutputItem)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrRecipeNotFound
 	}

@@ -770,8 +770,8 @@ honest AS (
   SELECT q.recipe_id, q.name, q.category, q.throughput, l.output_item,
          round(q.gp_hr)::bigint AS view_gp_hr,
          q.margin_slow - 0.005 * (l.gross_in + l.gross_out) AS margin,
-         least(coalesce(q.actions_per_hour, 1e12), coalesce(q.limit_actions_per_hour, 1e12),
-               0.15 * q.market_actions_per_hour, $1::numeric / nullif(l.gross_in, 0) / 4) AS rate
+         floor(least(coalesce(q.actions_per_hour, 1e12), coalesce(q.limit_actions_per_hour, 1e12),
+                     0.15 * q.market_actions_per_hour, $1::numeric / nullif(l.gross_in, 0) / 4) * 4) / 4 AS rate
   FROM process_quotes_now q
   JOIN process_recipes r USING (recipe_id)
   JOIN legs l USING (recipe_id)
@@ -779,13 +779,13 @@ honest AS (
     AND q.margin_slow IS NOT NULL AND l.output_item IS NOT NULL
 ),
 snap AS (
-  SELECT recipe_id, count(*) AS hours, count(*) FILTER (WHERE gp_hr > 0) AS positive
+  SELECT recipe_id, count(*) AS hours, count(*) FILTER (WHERE gp_hr >= $3) AS at_floor
   FROM process_snapshots WHERE ts > now() - interval '24 hours' GROUP BY 1
 )
 SELECT h.recipe_id, h.name, h.category, h.throughput, h.output_item,
        round(h.margin * h.rate)::bigint AS gp_hr, h.view_gp_hr,
        round(h.rate, 1)::float8 AS actions_per_hour,
-       coalesce(s.hours, 0), coalesce(s.positive, 0)
+       coalesce(s.hours, 0), coalesce(s.at_floor, 0)
 FROM honest h
 LEFT JOIN snap s USING (recipe_id)
 WHERE h.rate IS NOT NULL
@@ -793,7 +793,7 @@ ORDER BY h.margin * h.rate DESC
 LIMIT $2`
 
 func (c *Collector) sweepProcess(ctx context.Context, asOf time.Time) int {
-	rows, err := c.Store.Pool.Query(ctx, processSweepSQL, c.Cfg.ResearchBudgetGp, c.Cfg.SnapshotTopN)
+	rows, err := c.Store.Pool.Query(ctx, processSweepSQL, c.Cfg.ResearchBudgetGp, c.Cfg.SnapshotTopN, eval.FloorPGpHr)
 	if err != nil {
 		log.Printf("collect: process sweep: %v", err)
 		return 0
@@ -809,21 +809,39 @@ func (c *Collector) sweepProcess(ctx context.Context, asOf time.Time) int {
 		ViewGpHr       *int64  `json:"view_gp_hr"`
 		ActionsPerHour float64 `json:"actions_per_hour"`
 		Hours          int     `json:"hours_24h"`
-		Positive       int     `json:"positive_hours_24h"`
+		AtFloor        int     `json:"hours_at_floor_24h"`
 	}
 	var parsed []processRow
+	// Best recipe per output only: two share a signal, keyed on the item, and the later
+	// lower-ranked row would overwrite the better one.
+	seen := map[int]bool{}
 	for rows.Next() {
 		var r processRow
 		if err := rows.Scan(&r.RecipeID, &r.Name, &r.Category, &r.Throughput, &r.OutputItem,
-			&r.GpHr, &r.ViewGpHr, &r.ActionsPerHour, &r.Hours, &r.Positive); err != nil {
+			&r.GpHr, &r.ViewGpHr, &r.ActionsPerHour, &r.Hours, &r.AtFloor); err != nil {
 			log.Printf("collect: process scan: %v", err)
 			return 0
 		}
-		parsed = append(parsed, r)
+		if !seen[r.OutputItem] {
+			seen[r.OutputItem] = true
+			parsed = append(parsed, r)
+		}
+	}
+	// A recipe already on the board needs no new look: the vet would refuse it, and a
+	// new signal can start a run. A failed lookup signals anyway, as the vet still holds.
+	open := map[int]bool{}
+	for _, r := range parsed {
+		if r.GpHr >= eval.FloorPGpHr {
+			has, err := c.Store.HasOpenStrategyForItem(ctx, r.OutputItem, "P")
+			if err != nil {
+				log.Printf("collect: process open lookup %d: %v", r.OutputItem, err)
+			}
+			open[r.OutputItem] = has
+		}
 	}
 	return persist(c, ctx, asOf, "process", parsed, func(r processRow) (int, string, bool) {
-		persistent := r.Hours >= 12 && float64(r.Positive) >= 0.8*float64(r.Hours)
-		return r.OutputItem, r.Name, r.GpHr >= eval.FloorPGpHr && persistent
+		persistent := r.Hours >= 12 && float64(r.AtFloor) >= 0.8*float64(r.Hours)
+		return r.OutputItem, r.Name, r.GpHr >= eval.FloorPGpHr && persistent && !open[r.OutputItem]
 	})
 }
 

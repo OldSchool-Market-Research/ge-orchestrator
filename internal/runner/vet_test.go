@@ -432,6 +432,8 @@ func TestSizeOverstatedCapitalIsOnlyNoted(t *testing.T) {
 func TestProcessVeto(t *testing.T) {
 	proj := func(v int64) *int64 { return &v }
 	good := &eval.ProcessSnap{Throughput: "fixed"}
+	age := int64(6*3600 + 1)
+	staleAge := &age
 	if reason := processVeto(good, proj(250_000)); reason != "" {
 		t.Errorf("exactly the floor: %q", reason)
 	}
@@ -446,6 +448,7 @@ func TestProcessVeto(t *testing.T) {
 		{"no rate", eval.ProcessSnap{Throughput: "unknown"}, proj(900_000), "no known rate"},
 		{"no limit", eval.ProcessSnap{Throughput: "fixed", UnknownLimitLegs: 1}, proj(900_000), "buy limit"},
 		{"no price or no earnings", eval.ProcessSnap{Throughput: "fixed"}, nil, "doesn't earn"},
+		{"stale leg", eval.ProcessSnap{Throughput: "fixed", MaxLegAgeS: staleAge}, proj(900_000), "6h"},
 	}
 	for _, c := range cases {
 		if reason := processVeto(&c.snap, c.proj); !strings.Contains(reason, c.want) {
@@ -456,13 +459,22 @@ func TestProcessVeto(t *testing.T) {
 
 func TestProcessPersistenceVeto(t *testing.T) {
 	for _, c := range []struct {
-		positive, total int
-		veto            bool
+		atFloor, total int
+		veto           bool
 	}{
 		{12, 12, false}, {20, 24, false}, {19, 24, true}, {11, 11, true}, {0, 0, true},
 	} {
-		if got := processPersistenceVeto(c.positive, c.total) != ""; got != c.veto {
-			t.Errorf("%d of %d: veto=%v", c.positive, c.total, got)
+		if got := processPersistenceVeto(c.atFloor, c.total) != ""; got != c.veto {
+			t.Errorf("%d of %d: veto=%v", c.atFloor, c.total, got)
 		}
+	}
+}
+
+func TestGraveyardVetoOnPSaysNoGp(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	g := store.GraveyardRow{ItemID: 2507, Archetype: "P", Kills: 3, EstRealizedGp: 9_000_000, LastKilledAt: now.Add(-time.Hour)}
+	reason := graveyardVeto(g, 14*24*time.Hour, now)
+	if !strings.Contains(reason, "3 kills") || strings.Contains(reason, "gp realized") {
+		t.Errorf("%q", reason)
 	}
 }
