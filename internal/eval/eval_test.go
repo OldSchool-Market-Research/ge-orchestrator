@@ -564,6 +564,9 @@ func TestProjectComboUsesFourHourVolume(t *testing.T) {
 	snaps[139].Vol4h = 0
 	if p := ProjectComboPer1h(legs, 1000, snaps); p != nil {
 		t.Fatalf("a leg with no 4h volume can't fill: %d", *p)
+	}
+}
+
 func TestRecipeMargin(t *testing.T) {
 	in := []store.RelationLeg{{ItemID: 139, Qty: 4}}
 	out := []store.RelationLeg{{ItemID: 2434, Qty: 3}}

@@ -207,6 +207,8 @@ func TestDefaultsKeepFlipLanesOff(t *testing.T) {
 	if err := p.Validate(); err != nil {
 		t.Error(err)
 	}
+}
+
 func TestWriteProposals(t *testing.T) {
 	var empty strings.Builder
 	writeProposals(&empty, nil)
