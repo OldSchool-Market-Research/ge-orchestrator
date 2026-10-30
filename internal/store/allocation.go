@@ -226,7 +226,7 @@ func (s *Store) laneYields(ctx context.Context) ([]LaneYield, []SourceYield, err
 	}
 	defer rows.Close()
 	byLane := map[string]*LaneYield{}
-	var sources []SourceYield
+	sources := []SourceYield{}
 	for rows.Next() {
 		var c SourceYield
 		var epoch int

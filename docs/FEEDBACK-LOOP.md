@@ -226,9 +226,10 @@ None of it can say which research method pays, because strategies didn't record
 where they came from. P1 starts recording that, in log mode.
 
 - **Provenance** (`store.AttachProvenance`, inferred at ingest): `source_signal_id`,
-  `source_lens` (signal kind, `sweep:<lens>` for the lane's own collector screen, or
-  `free`) and `screen_hits`. Screens are association, not cause: the agent runs
-  similar screens of its own.
+  `source_lens` (signal kind, `sweep:<lens>` when the brief showed the item in its
+  lane's collector rows, or `free`) and `screen_hits` (every collector lens holding
+  it, shown or not). Screens are association, not cause: the agent runs similar
+  screens of its own.
 - **Allocation** (`store.CompileAllocation`, each collector sweep, append-only
   `lane_allocation`): ships, 6h survival, confirms and realized gp per lane and per
   source, how each signal kind's signals ended, and the lane weights that would

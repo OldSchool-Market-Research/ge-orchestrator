@@ -149,7 +149,7 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 		}
 	}
 
-	writeSweep(ctx, &b, s, p)
+	writeSweep(ctx, &b, s, p, at)
 
 	rows, err := s.Scoreboard(ctx)
 	if err != nil {
@@ -452,9 +452,22 @@ const (
 	sweepTitleSeasonal  = "hour-of-week amplitude (timing evidence only — not a strategy source)"
 )
 
-// HasPrecomputedScans reports whether a rendered brief carries both scans, the
-// only case where the agent may be told to read them here instead of calling
-// the slow tools: writeSweep skips a lens with no rows.
+// sweepMaxAge is how old a lens's rows may be before the brief flags them. The
+// collector runs hourly, so past this it has failed or stalled.
+const sweepMaxAge = 2 * time.Hour
+
+// sweepHeading is a lens's line in the sweep. A stale sweep is marked up front,
+// which also keeps HasPrecomputedScans from matching it.
+func sweepHeading(title string, asOf, now time.Time) string {
+	if now.Sub(asOf) > sweepMaxAge {
+		return fmt.Sprintf("- STALE, the collector is behind: %s (as of %s):\n", title, asOf.Format("01-02 15:04"))
+	}
+	return fmt.Sprintf("- %s (as of %s):\n", title, asOf.Format("01-02 15:04"))
+}
+
+// HasPrecomputedScans reports whether a rendered brief carries both scans, fresh,
+// the only case where the agent may be told to read them here instead of calling
+// the slow tools: writeSweep skips a lens with no rows and marks a stale one.
 func HasPrecomputedScans(text string) bool {
 	return strings.Contains(text, "- "+sweepTitleVolumeHow) && strings.Contains(text, "- "+sweepTitleSeasonal)
 }
@@ -462,7 +475,7 @@ func HasPrecomputedScans(text string) bool {
 // writeSweep appends a compact view of the collector's latest sweep so the
 // model starts from accumulated intelligence instead of re-scanning cold.
 // Best-effort: a missing sweep (fresh install) just omits the section.
-func writeSweep(ctx context.Context, b *strings.Builder, s *store.Store, p Params) {
+func writeSweep(ctx context.Context, b *strings.Builder, s *store.Store, p Params, at time.Time) {
 	lenses := []struct{ lens, lane, title string }{
 		{"combo", "C", "lane C candidates: conversions priced both directions, ranked by budget-sized gp/4h (budget_cycle_gp — already sized to the research budget, do not dismiss on per-conversion margin)"},
 		{"vflip", "F", "lane F candidates: volume flips ranked by margin x buy_limit (gp_cycle)"},
@@ -477,7 +490,7 @@ func writeSweep(ctx context.Context, b *strings.Builder, s *store.Store, p Param
 		if w, ok := p.Archetypes[l.lane]; ok && w == 0 {
 			continue // a lane the brief switches off gets no candidates or evidence
 		}
-		rows, err := s.LatestTrends(ctx, l.lens, 5)
+		rows, err := s.LatestTrends(ctx, l.lens, store.BriefSweepRows(l.lens))
 		if err != nil || len(rows) == 0 {
 			continue
 		}
@@ -485,7 +498,7 @@ func writeSweep(ctx context.Context, b *strings.Builder, s *store.Store, p Param
 			b.WriteString("\n### Latest market sweep (collector, no-LLM — re-verify anything you act on with live tools)\n")
 			wrote = true
 		}
-		fmt.Fprintf(b, "- %s (as of %s):\n", l.title, rows[0].AsOf.Format("01-02 15:04"))
+		b.WriteString(sweepHeading(l.title, rows[0].AsOf, at))
 		for _, r := range rows {
 			fmt.Fprintf(b, "  - %s\n", compactJSON(r.Metrics))
 		}

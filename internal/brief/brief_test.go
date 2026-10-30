@@ -158,3 +158,22 @@ func TestHasPrecomputedScans(t *testing.T) {
 		}
 	}
 }
+
+func TestSweepHeadingMarksStaleScans(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	fresh := "- " + sweepTitleSeasonal + " (as of 10-30 11:00):\n"
+	if got := sweepHeading(sweepTitleSeasonal, now.Add(-time.Hour), now); got != fresh {
+		t.Errorf("fresh heading %q", got)
+	}
+	stale := sweepHeading(sweepTitleVolumeHow, now.Add(-3*time.Hour), now)
+	if !strings.Contains(stale, "STALE") || !strings.Contains(stale, sweepTitleVolumeHow) {
+		t.Errorf("stale heading %q", stale)
+	}
+	// A stale scan can't stand in for the tool: the proxy must not refuse it.
+	if HasPrecomputedScans(fresh + stale) {
+		t.Error("a stale lens must not count as precomputed")
+	}
+	if !HasPrecomputedScans(fresh + sweepHeading(sweepTitleVolumeHow, now.Add(-time.Hour), now)) {
+		t.Error("both fresh")
+	}
+}

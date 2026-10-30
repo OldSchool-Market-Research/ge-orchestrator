@@ -87,3 +87,9 @@ func TestMedianOf(t *testing.T) {
 		t.Errorf("even %v", *m)
 	}
 }
+
+func TestBriefSweepRows(t *testing.T) {
+	if BriefSweepRows("volume_how") != 15 || BriefSweepRows("combo") != 5 {
+		t.Errorf("rows: %d, %d", BriefSweepRows("volume_how"), BriefSweepRows("combo"))
+	}
+}

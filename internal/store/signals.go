@@ -240,11 +240,12 @@ func (s *Store) ResolveSignal(ctx context.Context, signalID int64, verdict, reas
 	return nil
 }
 
-// ReleaseRunSignals returns a failed run's assigned signals to the queue so
-// the next run picks them up.
+// ReleaseRunSignals returns a run's unanswered signals to the queue so the next
+// run picks them up. A signal going back is open again, so it drops any link to a
+// strategy inferred for it; the strategy keeps its source_signal_id.
 func (s *Store) ReleaseRunSignals(ctx context.Context, runID int64) error {
 	_, err := s.Pool.Exec(ctx, `UPDATE orchestrator.signals
-		SET status='pending', run_id=NULL WHERE run_id=$1 AND status='assigned'`, runID)
+		SET status='pending', run_id=NULL, strategy_id=NULL WHERE run_id=$1 AND status='assigned'`, runID)
 	return err
 }
 
@@ -279,6 +280,16 @@ func (s *Store) collectSignals(ctx context.Context, query string, args ...any) (
 }
 
 // --- trend snapshots (the durable market-intelligence base) ---
+
+// BriefSweepRows is how many of a lens's top rows the brief shows, which is also
+// what provenance credits to it. The same-hour volume lens shows more: it stands
+// in for a refused 25-row tool call, and its very top rows are often illiquid.
+func BriefSweepRows(lens string) int {
+	if lens == "volume_how" {
+		return 15
+	}
+	return 5
+}
 
 type TrendRow struct {
 	AsOf    time.Time       `json:"as_of"`

@@ -59,9 +59,6 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// calibration serves the learning chart (docs/FEEDBACK-LOOP.md §4): the
-// latest factors per archetype, their history, and the failure-mode digest
-// over the same trailing window. ?days bounds the history (default 30).
 // daysParam reads the optional ?days= window, writing the 400 itself when bad.
 func daysParam(w http.ResponseWriter, r *http.Request, def int) (int, bool) {
 	d := r.URL.Query().Get("days")
@@ -109,6 +106,9 @@ func (s *Server) regime(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, history)
 }
 
+// calibration serves the learning chart (docs/FEEDBACK-LOOP.md §4): the
+// latest factors per archetype, their history, and the failure-mode digest
+// over the same trailing window. ?days bounds the history (default 30).
 func (s *Server) calibration(w http.ResponseWriter, r *http.Request) {
 	days := 30
 	if d := r.URL.Query().Get("days"); d != "" {

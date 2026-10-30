@@ -26,11 +26,11 @@ func TestProvenanceAllocationRegime(t *testing.T) {
 	if _, err := s.OrphanRunningRuns(ctx); err != nil {
 		t.Fatal(err)
 	}
-	const item, screenItem, freeItem = 876541, 876542, 876543
+	const item, screenItem, freeItem, deepItem = 876541, 876542, 876543, 876545
 	cleanup := func() {
-		s.Pool.Exec(ctx, `DELETE FROM orchestrator.signals WHERE item_id = ANY($1)`, []int{item, screenItem, freeItem})
-		s.Pool.Exec(ctx, `DELETE FROM orchestrator.trend_snapshots WHERE item_id = ANY($1)`, []int{item, screenItem, freeItem})
-		s.Pool.Exec(ctx, `DELETE FROM orchestrator.strategies WHERE primary_item_id = ANY($1)`, []int{item, screenItem, freeItem})
+		s.Pool.Exec(ctx, `DELETE FROM orchestrator.signals WHERE item_id = ANY($1)`, []int{item, screenItem, freeItem, deepItem})
+		s.Pool.Exec(ctx, `DELETE FROM orchestrator.trend_snapshots WHERE item_id = ANY($1)`, []int{item, screenItem, freeItem, deepItem})
+		s.Pool.Exec(ctx, `DELETE FROM orchestrator.strategies WHERE primary_item_id = ANY($1)`, []int{item, screenItem, freeItem, deepItem})
 		s.Pool.Exec(ctx, `DELETE FROM orchestrator.lane_allocation`)
 		s.Pool.Exec(ctx, `DELETE FROM orchestrator.regime_snapshots`)
 	}
@@ -43,6 +43,7 @@ func TestProvenanceAllocationRegime(t *testing.T) {
 	if err := s.InsertTrendSnapshots(ctx, sweep, "vflip", []TrendRow{
 		{AsOf: sweep, Lens: "vflip", ItemID: screenItem, Rank: 1, Metrics: json.RawMessage(`{"gp_cycle":900000,"margin":90}`)},
 		{AsOf: sweep, Lens: "vflip", ItemID: freeItem, Rank: 2, Metrics: json.RawMessage(`{"gp_cycle":300000,"margin":30}`)},
+		{AsOf: sweep, Lens: "vflip", ItemID: deepItem, Rank: 6, Metrics: json.RawMessage(`{"gp_cycle":250000,"margin":25}`)},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +54,7 @@ func TestProvenanceAllocationRegime(t *testing.T) {
 	}
 	// Ranked rows come back in rank order, not item order.
 	latest, err := s.LatestTrends(ctx, "vflip", 5)
-	if err != nil || len(latest) != 2 || latest[0].ItemID != screenItem {
+	if err != nil || len(latest) != 3 || latest[0].ItemID != screenItem {
 		t.Fatalf("latest %+v: %v", latest, err)
 	}
 	if _, err := s.UpsertSignal(ctx, "vflip", item, "Signal item", map[string]any{"gp_cycle": 900000}, 0); err != nil {
@@ -89,7 +90,7 @@ func TestProvenanceAllocationRegime(t *testing.T) {
 		}
 		return st
 	}
-	list := []SidecarStrategy{sc("F-signal", item), sc("F-screen", screenItem), sc("F-free", 876544)}
+	list := []SidecarStrategy{sc("F-signal", item), sc("F-screen", screenItem), sc("F-free", 876544), sc("F-deep", deepItem)}
 	if err := s.AttachProvenance(ctx, runID, time.Now().UTC(), list, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -126,6 +127,10 @@ func TestProvenanceAllocationRegime(t *testing.T) {
 	if len(got["F-screen"].hits) != 1 || got["F-screen"].hits[0] != "vflip" {
 		t.Errorf("screen hits %+v", got["F-screen"])
 	}
+	// Rank 6 is below what the brief showed: no credit, but the hit is kept.
+	if got["F-deep"].source != "free" || len(got["F-deep"].hits) != 1 {
+		t.Errorf("a row the brief never showed: %+v", got["F-deep"])
+	}
 	var linked int
 	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM orchestrator.signals sig
 		JOIN orchestrator.strategies st ON st.strategy_id = sig.strategy_id
@@ -152,7 +157,7 @@ func TestProvenanceAllocationRegime(t *testing.T) {
 			f = &first.Lanes[i]
 		}
 	}
-	if f == nil || f.Pitched < 3 || f.Closed < 1 || f.Survived < 1 || f.Target != nil {
+	if f == nil || f.Pitched < 4 || f.Closed < 1 || f.Survived < 1 || f.Target != nil {
 		t.Errorf("F yield %+v (the sample gate holds its target back)", f)
 	}
 	var sawSource bool
@@ -176,7 +181,7 @@ func TestProvenanceAllocationRegime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.FlipClearFloor == nil || *r.FlipClearFloor != 1 || r.FlipMedianGp == nil || *r.FlipMedianGp != 600000 {
+	if r.FlipClearFloor == nil || *r.FlipClearFloor != 1 || r.FlipMedianGp == nil || *r.FlipMedianGp != 300000 {
 		t.Errorf("flip regime %+v", r)
 	}
 	if r.VolumeAnomalies == nil || *r.VolumeAnomalies != 1 {

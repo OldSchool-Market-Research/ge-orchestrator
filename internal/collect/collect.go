@@ -125,12 +125,14 @@ func (c *Collector) Cycle(ctx context.Context) int {
 	asOf := time.Now().UTC()
 	newSignals := 0
 	newSignals += c.sweepVolume(ctx, asOf)
-	newSignals += c.sweepSeasonal(ctx, asOf)  // snapshots only — timing evidence, no signals
-	newSignals += c.sweepVolumeHow(ctx, asOf) // snapshots only — V evidence, no signals
-	newSignals += c.sweepBand(ctx, asOf)      // snapshots only — qualification evidence, no signals
+	newSignals += c.sweepBand(ctx, asOf) // snapshots only — qualification evidence, no signals
 	newSignals += c.sweepFlip(ctx, asOf)
 	newSignals += c.sweepHighValue(ctx, asOf)
 	newSignals += c.sweepCombo(ctx, asOf)
+	// The slow full-history scans (~3 min together) run after the price-sensitive
+	// lenses, so they don't delay detection.
+	newSignals += c.sweepSeasonal(ctx, asOf)  // snapshots only — timing evidence, no signals
+	newSignals += c.sweepVolumeHow(ctx, asOf) // snapshots only — V evidence, no signals
 	newSignals += c.sweepWatch(ctx)
 	if n, err := c.Store.ExpireStaleSignals(ctx, c.Cfg.SignalTTL); err != nil {
 		log.Printf("collect: expire stale: %v", err)
@@ -305,6 +307,11 @@ func (c *Collector) sweepVolumeHow(ctx context.Context, asOf time.Time) int {
 			return 0
 		}
 		parsed = append(parsed, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		log.Printf("collect: volume_how rows: %v", err)
+		return 0
 	}
 	rows.Close()
 	if err := tx.Commit(ctx); err != nil {

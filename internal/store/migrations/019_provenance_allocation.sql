@@ -17,10 +17,11 @@ ALTER TABLE orchestrator.trend_snapshots
 
 -- Where a strategy came from, inferred at ingest (runner.attachProvenance):
 --   source_signal_id  the assigned signal it answers, NULL when none does
---   source_lens       that signal's kind, 'sweep:<lens>' when the lane's collector
---                     screen held the item before the run, else 'free'. NULL on
+--   source_lens       that signal's kind, 'sweep:<lens>' when the brief showed the
+--                     item in its lane's collector rows, else 'free'. NULL on
 --                     history: backfilling would be a guess
---   screen_hits       every collector lens holding the item before the run
+--   screen_hits       every collector lens holding the item before the run, shown
+--                     or not
 -- Screens are association, not cause: the agent runs similar screens of its own.
 ALTER TABLE orchestrator.strategies
   ADD COLUMN source_signal_id bigint,

@@ -31,7 +31,7 @@ func (s *Store) AttachProvenance(ctx context.Context, runID int64, runStart time
 			ids = append(ids, list[i].PrimaryItemID())
 		}
 	}
-	hits, err := s.screenHits(ctx, runStart, ids)
+	hits, shown, err := s.screenHits(ctx, runStart, ids)
 	if err != nil {
 		return err
 	}
@@ -39,32 +39,38 @@ func (s *Store) AttachProvenance(ctx context.Context, runID int64, runStart time
 		if len(list[i].Items) == 0 {
 			continue // InsertStrategies rejects the whole sidecar with a real error
 		}
-		h := hits[list[i].PrimaryItemID()]
-		list[i].ScreenHits = h
-		list[i].SourceSignalID, list[i].SourceLens = attribute(list[i], assigned, verdicts, h)
+		id := list[i].PrimaryItemID()
+		list[i].ScreenHits = hits[id]
+		list[i].SourceSignalID, list[i].SourceLens = attribute(list[i], assigned, verdicts, shown[id])
 	}
 	return nil
 }
 
 // attribute picks a strategy's source: the assigned signal whose shipped verdict
-// names it, else an assigned signal for its item or recipe (its own lane's kind
-// first), else its lane's collector screen, else "free". Other lanes' screens
-// holding the item stay in screen_hits as association only: a seasonal top-25
-// row did not find a conversion.
-func attribute(st SidecarStrategy, assigned []Signal, verdicts []SignalVerdict, hits []string) (*int64, string) {
+// names it, else an assigned signal for its item or recipe that the run didn't
+// dismiss (its own lane's kind first), else its lane's collector rows if the brief
+// showed the item there, else "free". shown lists those lenses. Everything else
+// stays in screen_hits as association only: the agent runs its own screens, so a
+// row the brief never showed did not find this strategy.
+func attribute(st SidecarStrategy, assigned []Signal, verdicts []SignalVerdict, shown []string) (*int64, string) {
 	byID := make(map[int64]Signal, len(assigned))
 	for _, sig := range assigned {
 		byID[sig.SignalID] = sig
 	}
+	dismissed := map[int64]bool{}
 	for _, v := range verdicts {
-		if sig, ok := byID[int64(v.SignalID)]; ok && v.Verdict == "shipped" && st.ID != "" && strings.Contains(v.Reason, st.ID) {
+		if v.Verdict != "shipped" {
+			dismissed[int64(v.SignalID)] = true
+			continue
+		}
+		if sig, ok := byID[int64(v.SignalID)]; ok && st.ID != "" && strings.Contains(v.Reason, st.ID) {
 			id := sig.SignalID
 			return &id, sig.Kind
 		}
 	}
 	var other *Signal
 	for i := range assigned {
-		if !signalMatches(assigned[i], st) {
+		if dismissed[assigned[i].SignalID] || !signalMatches(assigned[i], st) {
 			continue
 		}
 		if kindLane[assigned[i].Kind] == st.Archetype {
@@ -79,7 +85,7 @@ func attribute(st SidecarStrategy, assigned []Signal, verdicts []SignalVerdict, 
 		id := other.SignalID
 		return &id, other.Kind
 	}
-	for _, lens := range hits {
+	for _, lens := range shown {
 		if kindLane[lens] == st.Archetype {
 			return nil, "sweep:" + lens
 		}
@@ -103,39 +109,49 @@ func signalMatches(sig Signal, st SidecarStrategy) bool {
 }
 
 // screenHits maps each item to the lenses whose latest sweep before the run held
-// it, sorted. Sweeps older than a day say nothing about this run.
-func (s *Store) screenHits(ctx context.Context, runStart time.Time, itemIDs []int) (map[int][]string, error) {
+// it, and to the subset whose rows the brief showed (BriefSweepRows), both sorted.
+// Sweeps older than a day say nothing about this run.
+func (s *Store) screenHits(ctx context.Context, runStart time.Time, itemIDs []int) (hits, shown map[int][]string, err error) {
 	rows, err := s.Pool.Query(ctx, `WITH latest AS (
 			SELECT lens, max(as_of) AS as_of FROM orchestrator.trend_snapshots
 			WHERE as_of <= $1 AND as_of > $1::timestamptz - interval '1 day'
 			GROUP BY lens
 		)
-		SELECT t.item_id, t.lens FROM orchestrator.trend_snapshots t
+		SELECT t.item_id, t.lens, coalesce(t.rank, 0) FROM orchestrator.trend_snapshots t
 		JOIN latest l USING (lens, as_of)
 		WHERE t.item_id = ANY($2)`, runStart, itemIDs)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
-	out := map[int][]string{}
+	hits, shown = map[int][]string{}, map[int][]string{}
 	for rows.Next() {
-		var id int
+		var id, rank int
 		var lens string
-		if err := rows.Scan(&id, &lens); err != nil {
-			return nil, err
+		if err := rows.Scan(&id, &lens, &rank); err != nil {
+			return nil, nil, err
 		}
-		out[id] = append(out[id], lens)
+		hits[id] = append(hits[id], lens)
+		if rank > 0 && rank <= BriefSweepRows(lens) {
+			shown[id] = append(shown[id], lens)
+		}
 	}
-	for id := range out {
-		sort.Strings(out[id])
+	for _, m := range []map[int][]string{hits, shown} {
+		for id := range m {
+			sort.Strings(m[id])
+		}
 	}
-	return out, rows.Err()
+	return hits, shown, rows.Err()
 }
 
-// LinkSignalStrategies points each signal at the accepted strategy it led to.
+// LinkSignalStrategies points each signal at the accepted strategy it led to. Two
+// ships can claim one signal (both directions of a recipe); the first one keeps it.
 func (s *Store) LinkSignalStrategies(ctx context.Context, runID int64) error {
 	_, err := s.Pool.Exec(ctx, `UPDATE orchestrator.signals sig SET strategy_id = st.strategy_id
-		FROM orchestrator.strategies st
-		WHERE st.run_id=$1 AND st.source_signal_id = sig.signal_id AND st.state <> 'vetoed'`, runID)
+		FROM (SELECT DISTINCT ON (source_signal_id) source_signal_id, strategy_id
+		      FROM orchestrator.strategies
+		      WHERE run_id=$1 AND source_signal_id IS NOT NULL AND state <> 'vetoed'
+		      ORDER BY source_signal_id, strategy_id) st
+		WHERE st.source_signal_id = sig.signal_id`, runID)
 	return err
 }

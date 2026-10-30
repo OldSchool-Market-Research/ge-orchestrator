@@ -53,6 +53,9 @@ func TestAttribute(t *testing.T) {
 			provStrategy("C-g", "C", 999), nil, []string{"seasonal", "vflip"}, 0, "free"},
 		{"the same-hour volume lens answers to V",
 			provStrategy("V-h", "V", 999), nil, []string{"volume_how"}, 0, "sweep:volume_how"},
+		{"a signal the run dismissed is no source",
+			provStrategy("V-j", "V", 300),
+			[]SignalVerdict{{SignalID: 4, Verdict: "dismissed", Reason: "spike"}}, nil, 0, "free"},
 		{"nothing at all",
 			provStrategy("F-i", "F", 999), nil, nil, 0, "free"},
 	}
