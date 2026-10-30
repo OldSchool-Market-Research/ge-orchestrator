@@ -34,6 +34,10 @@ func main() {
 		log.Fatalf("db: %v", err)
 	}
 	defer st.Pool.Close()
+	// C's realized gp and tick health changed meaning on 2026-10-30 (real 4h leg
+	// volume, freshness against each leg's own cadence), so its record restarts:
+	// old and new numbers must not blend in calibration or lane yields.
+	st.Epochs = map[string]int{"C": 2}
 	if n, err := st.OrphanRunningRuns(ctx); err != nil {
 		log.Fatalf("orphan recovery: %v", err)
 	} else if n > 0 {

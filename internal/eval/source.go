@@ -8,11 +8,15 @@ import (
 )
 
 // Snap is the frozen single-item view a tick evaluates against: latest
-// both-leg quote from prices_1m + 30m volume from prices_5m.
+// both-leg quote from prices_1m + recent volume and trade cadence from prices_5m.
 type Snap struct {
-	High, Low, Margin  *int64
-	HighAgeS, LowAgeS  *int
-	Vol30m             int64
+	High, Low, Margin *int64
+	HighAgeS, LowAgeS *int
+	Vol30m            int64
+	Vol4h             int64
+	// HighTicks24h and LowTicks24h count the 5m buckets of the last 24h where that
+	// side traded (a leg's cadence, as in ge-mcp combo_quote).
+	HighTicks24h, LowTicks24h int64
 }
 
 // WindowStats is what actually printed inside an hour-of-week window since a
@@ -67,19 +71,22 @@ WITH latest AS (
   FROM prices_1m WHERE item_id = $1 ORDER BY ts DESC LIMIT 1
 ),
 vol AS (
-  SELECT coalesce(sum(coalesce(high_volume,0)+coalesce(low_volume,0)),0) AS v
-  FROM prices_5m WHERE item_id = $1 AND ts > now() - interval '30 minutes'
+  SELECT coalesce(sum(coalesce(high_volume,0)+coalesce(low_volume,0)) FILTER (WHERE ts > now() - interval '30 minutes'),0) AS v,
+         coalesce(sum(coalesce(high_volume,0)+coalesce(low_volume,0)) FILTER (WHERE ts > now() - interval '4 hours'),0) AS v4h,
+         count(*) FILTER (WHERE coalesce(high_volume,0) > 0) AS high_ticks,
+         count(*) FILTER (WHERE coalesce(low_volume,0) > 0) AS low_ticks
+  FROM prices_5m WHERE item_id = $1 AND ts > now() - interval '24 hours'
 )
 SELECT l.high, l.low, l.margin,
        extract(epoch FROM now()-l.high_time)::int,
        extract(epoch FROM now()-l.low_time)::int,
-       v.v
+       v.v, v.v4h, v.high_ticks, v.low_ticks
 FROM vol v LEFT JOIN latest l ON true`
 
 func (p *pgSource) Snapshot(ctx context.Context, itemID int) (*Snap, error) {
 	var s Snap
 	if err := p.pool.QueryRow(ctx, snapshotSQL, itemID).Scan(
-		&s.High, &s.Low, &s.Margin, &s.HighAgeS, &s.LowAgeS, &s.Vol30m); err != nil {
+		&s.High, &s.Low, &s.Margin, &s.HighAgeS, &s.LowAgeS, &s.Vol30m, &s.Vol4h, &s.HighTicks24h, &s.LowTicks24h); err != nil {
 		return nil, err
 	}
 	return &s, nil
@@ -91,14 +98,18 @@ WITH latest AS (
   FROM prices_1m WHERE item_id = ANY($1) ORDER BY item_id, ts DESC
 ),
 vol AS (
-  SELECT item_id, coalesce(sum(coalesce(high_volume,0)+coalesce(low_volume,0)),0) AS v
-  FROM prices_5m WHERE item_id = ANY($1) AND ts > now() - interval '30 minutes'
+  SELECT item_id,
+         coalesce(sum(coalesce(high_volume,0)+coalesce(low_volume,0)) FILTER (WHERE ts > now() - interval '30 minutes'),0) AS v,
+         coalesce(sum(coalesce(high_volume,0)+coalesce(low_volume,0)) FILTER (WHERE ts > now() - interval '4 hours'),0) AS v4h,
+         count(*) FILTER (WHERE coalesce(high_volume,0) > 0) AS high_ticks,
+         count(*) FILTER (WHERE coalesce(low_volume,0) > 0) AS low_ticks
+  FROM prices_5m WHERE item_id = ANY($1) AND ts > now() - interval '24 hours'
   GROUP BY item_id
 )
 SELECT ids.id, l.high, l.low, l.margin,
        extract(epoch FROM now()-l.high_time)::int,
        extract(epoch FROM now()-l.low_time)::int,
-       coalesce(v.v, 0)
+       coalesce(v.v, 0), coalesce(v.v4h, 0), coalesce(v.high_ticks, 0), coalesce(v.low_ticks, 0)
 FROM unnest($1::int[]) AS ids(id)
 LEFT JOIN latest l ON l.item_id = ids.id
 LEFT JOIN vol v ON v.item_id = ids.id`
@@ -113,7 +124,7 @@ func (p *pgSource) SnapshotMany(ctx context.Context, itemIDs []int) (map[int]*Sn
 	for rows.Next() {
 		var id int
 		var s Snap
-		if err := rows.Scan(&id, &s.High, &s.Low, &s.Margin, &s.HighAgeS, &s.LowAgeS, &s.Vol30m); err != nil {
+		if err := rows.Scan(&id, &s.High, &s.Low, &s.Margin, &s.HighAgeS, &s.LowAgeS, &s.Vol30m, &s.Vol4h, &s.HighTicks24h, &s.LowTicks24h); err != nil {
 			return nil, err
 		}
 		out[id] = &s

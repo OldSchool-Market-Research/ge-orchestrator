@@ -20,9 +20,8 @@ var migrations embed.FS
 
 type Store struct {
 	Pool *pgxpool.Pool
-	// Epochs overrides the measurement epoch per archetype (nil/absent = 1).
-	// Set from main when the fill-sim flag flips F to epoch 2; see
-	// EpochFor and migration 015.
+	// Epochs overrides the measurement epoch per archetype (nil/absent = 1), set
+	// from main when a lane's numbers change meaning; see EpochFor and migration 015.
 	Epochs map[string]int
 }
 

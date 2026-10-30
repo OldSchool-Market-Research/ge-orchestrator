@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	freshMaxAgeS       = 900  // both legs traded within 15 min (S/V/C/U)
+	freshMaxAgeS       = 900  // both legs traded within 15 min (S/V/U; C judges by each leg's cadence)
 	freshMaxAgeSHold   = 6 * 3600 // H: multi-week items trade sparsely
 	entryBand          = 1.02 // entry reachable within +2%
 	exitBand           = 0.98 // exit printing within -2%

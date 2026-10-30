@@ -178,7 +178,7 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 			}
 			if r.RealizedVsProjected != nil {
 				line += fmt.Sprintf(", realized/projected %.2f", *r.RealizedVsProjected)
-				line += trackAdvice(closed, *r.RealizedVsProjected, calRow(cal, r.Archetype))
+				line += trackAdvice(*r.RealizedVsProjected, calRow(cal, r.Archetype))
 			}
 			b.WriteString(line + "\n")
 		}
@@ -243,11 +243,10 @@ func calRow(cal []store.CalibrationRow, archetype string) *store.CalibrationRow 
 }
 
 // trackAdvice is the track-record line's verdict on a realized/projected
-// ratio, read against how many recent closes survived at all.
-func trackAdvice(closed int, ratio float64, cal *store.CalibrationRow) string {
+// ratio, read against how many recent closes survived at all. The ratio only
+// exists from store.Scoreboard's sample of 5 closes in the current epoch.
+func trackAdvice(ratio float64, cal *store.CalibrationRow) string {
 	switch {
-	case closed < 5:
-		return " — insufficient sample, treat as unproven."
 	case cal != nil && cal.PSurvive != nil && *cal.PSurvive < trackMinSurvive:
 		return fmt.Sprintf(" — but only %d of %d recent closes lived past %.0fh, so projections have not held; require stronger evidence before pitching.",
 			cal.NSurvived, cal.NClosed, cal.SurviveHours)

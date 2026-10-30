@@ -110,9 +110,23 @@ type ScoreboardRow struct {
 	RealizedVsProjected *float64 `json:"realized_vs_projected"`
 }
 
+// scoreboardMinCloses is what a lane's current epoch needs before its ratio shows:
+// the counts are all-time, so the brief's own small-sample guard can't see that one
+// close in a new epoch is a sample of one.
+const scoreboardMinCloses = 5
+
+// Scoreboard returns each lane's all-time counts, and a realized/projected ratio
+// from its current measurement epoch only: a ratio carried over from the old measure
+// would tell every run about numbers that no longer mean the same thing (C's 0.48
+// read "projections have not held"). The ratio is nil until the epoch has
+// scoreboardMinCloses closes.
 func (s *Store) Scoreboard(ctx context.Context) ([]ScoreboardRow, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT archetype, n, confirmed, killed, expired, open, armed, vetoed,
-		realized_vs_projected::float8 FROM orchestrator.scoreboard ORDER BY archetype`)
+	ratios, err := s.currentEpochRatios(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.Pool.Query(ctx, `SELECT archetype, n, confirmed, killed, expired, open, armed, vetoed
+		FROM orchestrator.scoreboard ORDER BY archetype`)
 	if err != nil {
 		return nil, err
 	}
@@ -120,10 +134,50 @@ func (s *Store) Scoreboard(ctx context.Context) ([]ScoreboardRow, error) {
 	var out []ScoreboardRow
 	for rows.Next() {
 		var r ScoreboardRow
-		if err := rows.Scan(&r.Archetype, &r.N, &r.Confirmed, &r.Killed, &r.Expired, &r.Open, &r.Armed, &r.Vetoed, &r.RealizedVsProjected); err != nil {
+		if err := rows.Scan(&r.Archetype, &r.N, &r.Confirmed, &r.Killed, &r.Expired, &r.Open, &r.Armed, &r.Vetoed); err != nil {
 			return nil, err
 		}
+		r.RealizedVsProjected = ratios[r.Archetype]
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// currentEpochRatios is the ratio per lane over closes in its current epoch, leaving
+// out lanes under scoreboardMinCloses. Same ratio as the scoreboard view's.
+func (s *Store) currentEpochRatios(ctx context.Context) (map[string]*float64, error) {
+	lanes, epochs := []string{}, []int{}
+	for lane, epoch := range s.Epochs {
+		lanes, epochs = append(lanes, lane), append(epochs, epoch)
+	}
+	rows, err := s.Pool.Query(ctx, `SELECT s.archetype, count(*), round(avg(r.ratio)::numeric, 2)::float8
+		FROM orchestrator.strategies s
+		LEFT JOIN LATERAL (
+			SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY e.realized_per_1h_gp)
+			       / nullif(coalesce(s.projected_per_1h_gp, s.per_1h_gp), 0) AS ratio
+			FROM orchestrator.evaluations e
+			WHERE e.strategy_id = s.strategy_id
+			  AND (s.triggered_at IS NULL OR e.at >= s.triggered_at)
+		) r ON true
+		WHERE s.quarantined_reason IS NULL
+		  AND s.state NOT IN ('open','armed','vetoed')
+		  AND s.eval_epoch = coalesce((SELECT x.e FROM unnest($1::text[], $2::int[]) AS x(a, e) WHERE x.a = s.archetype), 1)
+		GROUP BY s.archetype`, lanes, epochs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]*float64{}
+	for rows.Next() {
+		var lane string
+		var closes int
+		var ratio *float64
+		if err := rows.Scan(&lane, &closes, &ratio); err != nil {
+			return nil, err
+		}
+		if closes >= scoreboardMinCloses {
+			out[lane] = ratio
+		}
 	}
 	return out, rows.Err()
 }

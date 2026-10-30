@@ -53,8 +53,9 @@ type CalibrationRow struct {
 }
 
 // EpochFor returns the archetype's current measurement epoch. The default
-// is 1 for everything; the fill-sim flag flip moves F to 2 (set from main
-// via Epochs). Strategies are stamped with it at insert; calibration
+// is 1; main sets the others via Epochs (C moved to 2 on 2026-10-30, when its
+// volume and freshness checks changed; a fill-sim flip would move F).
+// Strategies are stamped with it at insert; calibration
 // recomputes filter to it, so cross-regime samples never blend.
 func (s *Store) EpochFor(archetype string) int {
 	lane, _, _ := strings.Cut(archetype, ":") // a CalKey shares its lane's epoch
