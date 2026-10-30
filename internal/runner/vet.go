@@ -120,9 +120,9 @@ const (
 func (r *Runner) vet(ctx context.Context, p brief.Params, list []store.SidecarStrategy) (accepted []store.SidecarStrategy, vetoed []store.Vetoed) {
 	rec := r.loadRecord(ctx)
 	for _, st := range list {
-		var relKind string
-		reason, proj := r.vetOne(ctx, p, st, rec, &relKind)
-		st.RelationKind = relKind
+		var rel *store.Relation
+		reason, proj := r.vetOne(ctx, p, st, rec, &rel)
+		st.RelationKind, st.RelationFamily = relationLabels(rel)
 		if reason != "" {
 			vetoed = append(vetoed, store.Vetoed{Strategy: st, Reason: reason})
 			continue
@@ -196,14 +196,30 @@ func (r *Runner) loadRecord(ctx context.Context) *record {
 	return rec
 }
 
-// CalRowFor is the strategy's own calibration row: its recipe kind's once that
-// row measures something, else its lane's. Every C close writes all the kind
-// rows, so a thin kind always has one, and below its sample gate it holds only
-// the default factor, which must not stand in for a measured blended row.
+// relationLabels is a recipe's kind and family, "" for what's unknown.
+func relationLabels(rel *store.Relation) (kind, family string) {
+	if rel == nil {
+		return "", ""
+	}
+	if rel.Family != nil {
+		family = *rel.Family
+	}
+	return rel.Kind, family
+}
+
+// CalRowFor is the strategy's own calibration row: its recipe family's once that
+// row measures something, else its kind's, else its lane's. A close writes the kind
+// rows whether or not they have a sample, and below its sample gate a row holds only
+// the default factor, which must not stand in for a measured row above it.
 func (rec *record) CalRowFor(st store.SidecarStrategy) *store.CalibrationRow {
-	row := rec.CalRow(store.CalKey(st.Archetype, st.RelationKind))
-	if row != nil && (row.PSurvive != nil || row.PaceRatio != nil) {
-		return row
+	for _, group := range []string{st.RelationFamily, st.RelationKind} {
+		if group == "" {
+			continue
+		}
+		row := rec.CalRow(store.CalKey(st.Archetype, group))
+		if row != nil && (row.PSurvive != nil || row.PaceRatio != nil) {
+			return row
+		}
 	}
 	return rec.CalRow(st.Archetype)
 }
@@ -218,8 +234,8 @@ func (rec *record) FactorFor(st store.SidecarStrategy) float64 {
 }
 
 // vetOne returns the veto reason ("" = accepted) and the harness projection.
-// relKind receives a conversion's recipe kind once its relation is looked up.
-func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStrategy, rec *record, relKind *string) (string, *int64) {
+// relOut receives a conversion's recipe once its relation is looked up.
+func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStrategy, rec *record, relOut **store.Relation) (string, *int64) {
 	if len(st.Items) == 0 {
 		return "", nil // InsertStrategies rejects the whole sidecar with a real error
 	}
@@ -249,10 +265,8 @@ func (r *Runner) vetOne(ctx context.Context, p brief.Params, st store.SidecarStr
 				log.Printf("vet %s: relation %d lookup: %v", st.ID, *st.RelationID, err)
 				lookupOK = false // fail open, like every record-fed rule
 			}
-			if rel != nil {
-				st.RelationKind = rel.Kind
-				*relKind = rel.Kind
-			}
+			st.RelationKind, st.RelationFamily = relationLabels(rel)
+			*relOut = rel
 		}
 		if lookupOK {
 			if reason := comboRecipeVeto(st, rel); reason != "" {

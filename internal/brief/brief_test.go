@@ -47,15 +47,34 @@ func TestWriteCalibration(t *testing.T) {
 	}
 }
 
+func TestWriteCalibrationHidesThinFamilies(t *testing.T) {
+	var b strings.Builder
+	writeCalibration(&b, []store.CalibrationRow{
+		{Archetype: "C:moon", Factor: 0.8, PSurvive: fp(0.9), NSurvived: 18, NClosed: 20},
+		{Archetype: "C:robes", Factor: 0.15, NClosed: 2},
+		{Archetype: "C:decant", Factor: 0.15, NClosed: 2},
+	}, nil)
+	out := b.String()
+	if !strings.Contains(out, "- C:moon: factor 0.80") {
+		t.Errorf("a measured family shows:\n%s", out)
+	}
+	if strings.Contains(out, "C:robes") {
+		t.Errorf("a thin family holds only the default:\n%s", out)
+	}
+	if !strings.Contains(out, "- C:decant: factor 0.15") {
+		t.Errorf("kinds always show:\n%s", out)
+	}
+}
+
 func TestCalOrderPutsKindsAfterTheirLane(t *testing.T) {
 	got := calOrder([]store.CalibrationRow{
-		{Archetype: "F"}, {Archetype: "C:set"}, {Archetype: "C"}, {Archetype: "C:decant"},
+		{Archetype: "F"}, {Archetype: "C:set"}, {Archetype: "C"}, {Archetype: "C:decant"}, {Archetype: "C:barrows"},
 	})
 	var keys []string
 	for _, r := range got {
 		keys = append(keys, r.Archetype)
 	}
-	if s := strings.Join(keys, " "); s != "C C:decant C:set F" {
+	if s := strings.Join(keys, " "); s != "C C:decant C:set C:barrows F" {
 		t.Fatalf("order %q", s)
 	}
 }

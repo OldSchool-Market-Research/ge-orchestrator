@@ -42,14 +42,39 @@ type LaneYield struct {
 // SourceYield is one (lane, source) cell. Source is a strategy's source_lens,
 // or "unattributed" for ships from before provenance.
 type SourceYield struct {
-	Lane          string `json:"lane"`
-	Source        string `json:"source"`
-	Pitched       int    `json:"pitched"`
-	Vetoed        int    `json:"vetoed"`
-	Closed        int    `json:"closed"`
-	Survived      int    `json:"survived_6h"`
-	Confirmed     int    `json:"confirmed"`
-	EstRealizedGp int64  `json:"est_realized_gp"`
+	Lane   string `json:"lane"`
+	Source string `json:"source"`
+	yieldCounts
+}
+
+// yieldCounts is what any group of strategies did over the window.
+type yieldCounts struct {
+	Pitched       int   `json:"pitched"`
+	Vetoed        int   `json:"vetoed"`
+	Closed        int   `json:"closed"`
+	Survived      int   `json:"survived_6h"`
+	Confirmed     int   `json:"confirmed"`
+	EstRealizedGp int64 `json:"est_realized_gp"`
+}
+
+// add folds one grouped row into these counts.
+func (y *yieldCounts) add(c yieldCounts) {
+	y.Pitched += c.Pitched
+	y.Vetoed += c.Vetoed
+	y.Closed += c.Closed
+	y.Survived += c.Survived
+	y.Confirmed += c.Confirmed
+	y.EstRealizedGp += c.EstRealizedGp
+}
+
+// FamilyYield is one recipe family's record in lane C ("unlabelled" for a recipe
+// ge-data hasn't labelled). A record only: no weight follows from it yet, and most
+// families are well under the 20 closes a lane needs before its weight moves.
+type FamilyYield struct {
+	Family string `json:"family"`
+	Kind   string `json:"kind"`
+	yieldCounts
+	PerShipGp *int64 `json:"per_ship_gp"` // nil: nothing closed
 }
 
 // SignalKindYield is how one signal kind's resolved signals ended up.
@@ -70,6 +95,7 @@ type LaneAllocation struct {
 	WindowDays   int                `json:"window_days"`
 	Lanes        []LaneYield        `json:"lanes"`
 	Sources      []SourceYield      `json:"sources"`
+	Families     []FamilyYield      `json:"families"`
 	SignalKinds  []SignalKindYield  `json:"signal_kinds"`
 	Weights      map[string]float64 `json:"weights"`
 }
@@ -145,7 +171,7 @@ func stepWeights(base, prev, targets map[string]float64, elapsed time.Duration) 
 // CompileAllocation computes the current allocation against the operator's base
 // weights and appends it. Lanes read their current epoch only, like calibration.
 func (s *Store) CompileAllocation(ctx context.Context, base map[string]float64) (*LaneAllocation, error) {
-	lanes, sources, err := s.laneYields(ctx)
+	lanes, sources, families, err := s.laneYields(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -170,15 +196,16 @@ func (s *Store) CompileAllocation(ctx context.Context, base map[string]float64) 
 		elapsed = time.Since(prev.ComputedAt)
 	}
 	a := &LaneAllocation{Mode: "log", WindowDays: allocWindowDays, Lanes: lanes, Sources: sources,
-		SignalKinds: kinds, Weights: stepWeights(base, prevWeights, targets, elapsed)}
+		Families: families, SignalKinds: kinds, Weights: stepWeights(base, prevWeights, targets, elapsed)}
 	lanesJSON, _ := json.Marshal(a.Lanes)
 	sourcesJSON, _ := json.Marshal(a.Sources)
+	familiesJSON, _ := json.Marshal(a.Families)
 	kindsJSON, _ := json.Marshal(a.SignalKinds)
 	weightsJSON, _ := json.Marshal(a.Weights)
 	err = s.Pool.QueryRow(ctx, `INSERT INTO orchestrator.lane_allocation
-		(mode, window_days, lanes, sources, signal_kinds, weights)
-		VALUES ($1,$2,$3,$4,$5,$6) RETURNING allocation_id, computed_at`,
-		a.Mode, a.WindowDays, lanesJSON, sourcesJSON, kindsJSON, weightsJSON).
+		(mode, window_days, lanes, sources, signal_kinds, weights, families)
+		VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING allocation_id, computed_at`,
+		a.Mode, a.WindowDays, lanesJSON, sourcesJSON, kindsJSON, weightsJSON, familiesJSON).
 		Scan(&a.AllocationID, &a.ComputedAt)
 	if err != nil {
 		return nil, err
@@ -186,25 +213,27 @@ func (s *Store) CompileAllocation(ctx context.Context, base map[string]float64) 
 	return a, nil
 }
 
-// laneYields reads the window's strategies once, grouped by (lane, source,
-// epoch), and rolls up to lanes. Pitches count by opened_at and closes by
-// closed_at, so a lane's numbers need not be the same ships. Realized is PnL's
-// estimate: sim equity when a position closed, else median pace x hours held.
-func (s *Store) laneYields(ctx context.Context) ([]LaneYield, []SourceYield, error) {
+// laneYields reads the window's strategies once, grouped by (lane, source, epoch,
+// recipe), and rolls up to lanes, sources and C's families. Pitches count by
+// opened_at and closes by closed_at, so a lane's numbers need not be the same ships.
+// Realized is PnL's estimate: sim equity when a position closed, else median pace
+// x hours held.
+func (s *Store) laneYields(ctx context.Context) ([]LaneYield, []SourceYield, []FamilyYield, error) {
 	rows, err := s.Pool.Query(ctx, `WITH w AS (
 			SELECT s.strategy_id, s.archetype, coalesce(s.source_lens,'unattributed') AS source,
-			       s.eval_epoch, s.state, s.triggered_at,
+			       s.eval_epoch, s.state, s.triggered_at, r.kind, r.family,
 			       s.opened_at > now() - make_interval(days => $1) AS pitched_in,
 			       s.state IN ('killed','expired','confirmed')
 			         AND s.closed_at > now() - make_interval(days => $1)
 			         AND (s.archetype <> 'V' OR s.triggered_at IS NOT NULL) AS closed_in,
 			       extract(epoch from (s.closed_at - coalesce(s.triggered_at, s.opened_at)))/3600.0 AS hours
 			FROM orchestrator.strategies s
+			LEFT JOIN public.item_relations r ON r.relation_id = s.relation_id
 			WHERE s.quarantined_reason IS NULL
 			  AND (s.opened_at > now() - make_interval(days => $1)
 			       OR s.closed_at > now() - make_interval(days => $1))
 		)
-		SELECT w.archetype, w.source, w.eval_epoch,
+		SELECT w.archetype, w.source, w.eval_epoch, w.kind, w.family,
 		       count(*) FILTER (WHERE w.pitched_in),
 		       count(*) FILTER (WHERE w.pitched_in AND w.state = 'vetoed'),
 		       count(*) FILTER (WHERE w.closed_in),
@@ -220,24 +249,31 @@ func (s *Store) laneYields(ctx context.Context) ([]LaneYield, []SourceYield, err
 			  AND (w.triggered_at IS NULL OR e.at >= w.triggered_at)
 		) est ON w.closed_in
 		LEFT JOIN orchestrator.positions pos ON pos.strategy_id = w.strategy_id
-		GROUP BY 1, 2, 3`, allocWindowDays, CalSurviveHours)
+		GROUP BY 1, 2, 3, 4, 5`, allocWindowDays, CalSurviveHours)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer rows.Close()
 	byLane := map[string]*LaneYield{}
-	sources := []SourceYield{}
+	bySource := map[[2]string]*SourceYield{}
+	byFamily := map[string]*FamilyYield{}
 	for rows.Next() {
 		var c SourceYield
 		var epoch int
-		if err := rows.Scan(&c.Lane, &c.Source, &epoch, &c.Pitched, &c.Vetoed, &c.Closed,
+		var kind, family *string
+		if err := rows.Scan(&c.Lane, &c.Source, &epoch, &kind, &family, &c.Pitched, &c.Vetoed, &c.Closed,
 			&c.Survived, &c.Confirmed, &c.EstRealizedGp); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if epoch != s.EpochFor(c.Lane) {
 			continue
 		}
-		sources = append(sources, c)
+		src := bySource[[2]string{c.Lane, c.Source}]
+		if src == nil {
+			src = &SourceYield{Lane: c.Lane, Source: c.Source}
+			bySource[[2]string{c.Lane, c.Source}] = src
+		}
+		src.add(c.yieldCounts)
 		l := byLane[c.Lane]
 		if l == nil {
 			l = &LaneYield{Lane: c.Lane}
@@ -249,9 +285,21 @@ func (s *Store) laneYields(ctx context.Context) ([]LaneYield, []SourceYield, err
 		l.Survived += c.Survived
 		l.Confirmed += c.Confirmed
 		l.EstRealizedGp += c.EstRealizedGp
+		if c.Lane == "C" && kind != nil {
+			name := "unlabelled"
+			if family != nil {
+				name = *family
+			}
+			f := byFamily[name]
+			if f == nil {
+				f = &FamilyYield{Family: name, Kind: *kind}
+				byFamily[name] = f
+			}
+			f.add(c.yieldCounts)
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	lanes := make([]LaneYield, 0, len(byLane))
 	for _, l := range byLane {
@@ -262,13 +310,26 @@ func (s *Store) laneYields(ctx context.Context) ([]LaneYield, []SourceYield, err
 		lanes = append(lanes, *l)
 	}
 	sort.Slice(lanes, func(i, j int) bool { return lanes[i].Lane < lanes[j].Lane })
+	sources := make([]SourceYield, 0, len(bySource))
+	for _, src := range bySource {
+		sources = append(sources, *src)
+	}
 	sort.Slice(sources, func(i, j int) bool {
 		if sources[i].Lane != sources[j].Lane {
 			return sources[i].Lane < sources[j].Lane
 		}
 		return sources[i].Source < sources[j].Source
 	})
-	return lanes, sources, nil
+	families := make([]FamilyYield, 0, len(byFamily))
+	for _, f := range byFamily {
+		if f.Closed > 0 {
+			v := f.EstRealizedGp / int64(f.Closed)
+			f.PerShipGp = &v
+		}
+		families = append(families, *f)
+	}
+	sort.Slice(families, func(i, j int) bool { return families[i].EstRealizedGp > families[j].EstRealizedGp })
+	return lanes, sources, families, nil
 }
 
 func (s *Store) signalKindYields(ctx context.Context) ([]SignalKindYield, error) {
@@ -296,18 +357,18 @@ func (s *Store) signalKindYields(ctx context.Context) ([]SignalKindYield, error)
 	return out, rows.Err()
 }
 
-const allocationCols = `allocation_id, computed_at, mode, window_days, lanes, sources, signal_kinds, weights`
+const allocationCols = `allocation_id, computed_at, mode, window_days, lanes, sources, signal_kinds, weights, families`
 
 func scanAllocation(row interface{ Scan(...any) error }) (*LaneAllocation, error) {
 	var a LaneAllocation
-	var lanes, sources, kinds, weights []byte
-	if err := row.Scan(&a.AllocationID, &a.ComputedAt, &a.Mode, &a.WindowDays, &lanes, &sources, &kinds, &weights); err != nil {
+	var lanes, sources, kinds, weights, families []byte
+	if err := row.Scan(&a.AllocationID, &a.ComputedAt, &a.Mode, &a.WindowDays, &lanes, &sources, &kinds, &weights, &families); err != nil {
 		return nil, err
 	}
 	for _, f := range []struct {
 		raw []byte
 		to  any
-	}{{lanes, &a.Lanes}, {sources, &a.Sources}, {kinds, &a.SignalKinds}, {weights, &a.Weights}} {
+	}{{lanes, &a.Lanes}, {sources, &a.Sources}, {kinds, &a.SignalKinds}, {weights, &a.Weights}, {families, &a.Families}} {
 		if err := json.Unmarshal(f.raw, f.to); err != nil {
 			return nil, err
 		}
