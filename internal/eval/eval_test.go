@@ -534,6 +534,8 @@ func TestLegFreshUsesTheLegsOwnCadence(t *testing.T) {
 		{"active leg past 15 min", iptr(901), 288, false},
 		{"thin leg at 2h, 48m gap", iptr(7200), 30, true},
 		{"thin leg at 2h, 12m gap", iptr(7200), 120, false},
+		{"very thin leg is capped at 6h", iptr(6*3600 + 1), 2, false},
+		{"very thin leg under the cap", iptr(6 * 3600), 2, true},
 		{"no trades in 24h", iptr(60), 0, false},
 		{"never traded", nil, 40, false},
 	}
@@ -541,5 +543,26 @@ func TestLegFreshUsesTheLegsOwnCadence(t *testing.T) {
 		if got := legFresh(c.age, c.trades); got != c.want {
 			t.Errorf("%s: fresh=%v", c.name, got)
 		}
+	}
+}
+
+func TestProjectComboUsesFourHourVolume(t *testing.T) {
+	legs := []store.Leg{
+		{ItemID: 139, Side: "buy", Qty: 4},
+		{ItemID: 2434, Side: "sell", Qty: 3},
+	}
+	snaps := map[int]*Snap{
+		139:  {Low: i64(6900), High: i64(7000), Vol30m: 0, Vol4h: 40000},
+		2434: {Low: i64(9300), High: i64(9500), Vol30m: 6000, Vol4h: 48000},
+	}
+	// 15% of 40000 / 4 = 1500 conversions, so 1000 units aren't capped. Margin after
+	// slippage and tax: 3 x (9452 - 189) - 4 x 6934 = 27789 - 27736 = 53.
+	p := ProjectComboPer1h(legs, 1000, snaps)
+	if p == nil || *p != 53*1000/4 {
+		t.Fatalf("projection %v", p)
+	}
+	snaps[139].Vol4h = 0
+	if p := ProjectComboPer1h(legs, 1000, snaps); p != nil {
+		t.Fatalf("a leg with no 4h volume can't fill: %d", *p)
 	}
 }

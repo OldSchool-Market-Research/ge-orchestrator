@@ -58,9 +58,14 @@ func ProjectComboPer1h(legs []store.Leg, unitsUsed int64, snaps map[int]*Snap) *
 	return &v
 }
 
-// legFreshGaps is how many of its own typical trade gaps a leg's quote may age
-// before it counts as stale (ge-mcp combo_quote's worst_leg_age_ratio ~3).
-const legFreshGaps = 3
+const (
+	// legFreshGaps is how many of its own typical trade gaps a leg's quote may age
+	// before it counts as stale (ge-mcp combo_quote's worst_leg_age_ratio ~3).
+	legFreshGaps = 3
+	// legFreshMaxAgeS caps that: a leg printing a few times a day would otherwise
+	// pass at any age, and a 24h-old price isn't a live margin.
+	legFreshMaxAgeS = 6 * 3600
+)
 
 // legConversions is how many conversions per 4h a leg supports at participation,
 // from its real trailing 4h volume. A 30-minute window x 8 reads 0 for any leg that
@@ -83,7 +88,11 @@ func legFresh(ageS *int, trades24h int64) bool {
 	if ageS == nil || trades24h <= 0 {
 		return false
 	}
-	return int64(*ageS) <= legFreshGaps*86400/trades24h
+	allowed := legFreshGaps * 86400 / trades24h
+	if allowed > legFreshMaxAgeS {
+		allowed = legFreshMaxAgeS
+	}
+	return int64(*ageS) <= allowed
 }
 
 // computeCombo evaluates a C strategy: re-price every leg at the latest

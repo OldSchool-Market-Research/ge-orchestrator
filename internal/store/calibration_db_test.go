@@ -103,3 +103,93 @@ func TestRecomputeCalibrationByRecipeKind(t *testing.T) {
 		}
 	}
 }
+
+// TestScoreboardRatioReadsTheCurrentEpoch: an epoch cut hides the old ratio until the
+// new epoch has a sample, without touching the all-time counts. Needs STORE_TEST_DSN.
+func TestScoreboardRatioReadsTheCurrentEpoch(t *testing.T) {
+	dsn := os.Getenv("STORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("STORE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	if _, err := s.OrphanRunningRuns(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer s.OrphanRunningRuns(ctx)
+	runID, err := s.CreateRun(ctx, json.RawMessage(`{}`), "test brief", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.strategies WHERE run_id=$1`, runID)
+	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.evaluations WHERE strategy_id IN (SELECT strategy_id FROM orchestrator.strategies WHERE run_id=$1)`, runID)
+
+	// ship closes one U strategy pacing at the given share of its 1000 gp/hr plan.
+	n := 0
+	ship := func(share int64) {
+		t.Helper()
+		n++
+		sid := fmt.Sprintf("U-ratio-test-%d", n)
+		var st SidecarStrategy
+		raw := fmt.Sprintf(`{"id":%q,"archetype":"U","title":"t","thesis":"t",
+			"items":[{"name":"x","id":%d}],"entry":"e","exit":"x","entry_price":1,"exit_price":2,
+			"horizon":"h","capital_required":1,"size":{"buy_limit":1,"vol_constrained":1,"units_used":1},
+			"expected_value":{"per_cycle_gp":1,"per_1h_gp":1000,"per_day_gp":1,"roi_pct":1},
+			"confidence":"medium","invalidation":"i"}`, sid, 870000+n)
+		if err := json.Unmarshal([]byte(raw), &st); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.InsertStrategies(ctx, runID, time.Now().UTC().Add(-time.Hour), []SidecarStrategy{st}, nil); err != nil {
+			t.Fatal(err)
+		}
+		var id int64
+		if err := s.Pool.QueryRow(ctx, `UPDATE orchestrator.strategies SET state='killed', closed_at=now()
+			WHERE run_id=$1 AND sid=$2 RETURNING strategy_id`, runID, sid).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		realized := share * 10
+		if err := s.InsertEvaluation(ctx, Evaluation{StrategyID: id, At: time.Now().UTC(), Verdict: "healthy",
+			Checks: json.RawMessage(`{}`), Detail: json.RawMessage(`{}`), RealizedPer1hGp: &realized}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ratio := func() (*float64, int) {
+		t.Helper()
+		rows, err := s.Scoreboard(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rows {
+			if r.Archetype == "U" {
+				return r.RealizedVsProjected, r.N
+			}
+		}
+		t.Fatal("no U row")
+		return nil, 0
+	}
+
+	for i := 0; i < scoreboardMinCloses; i++ {
+		ship(20) // the old epoch paces at 0.20
+	}
+	if got, _ := ratio(); got == nil || *got != 0.2 {
+		t.Fatalf("epoch 1 ratio %v", got)
+	}
+	s.Epochs = map[string]int{"U": 2}
+	if got, n := ratio(); got != nil || n != scoreboardMinCloses {
+		t.Fatalf("a cut hides the ratio, not the counts: %v n=%d", got, n)
+	}
+	for i := 0; i < scoreboardMinCloses-1; i++ {
+		ship(90)
+	}
+	if got, _ := ratio(); got != nil {
+		t.Fatalf("under the sample, no ratio: %v", *got)
+	}
+	ship(90)
+	if got, n := ratio(); got == nil || *got != 0.9 || n != 2*scoreboardMinCloses {
+		t.Fatalf("the new epoch's ratio alone: %v n=%d", got, n)
+	}
+}
