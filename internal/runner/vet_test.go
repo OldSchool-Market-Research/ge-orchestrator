@@ -302,29 +302,47 @@ func TestComboRecipeVetoNoArb(t *testing.T) {
 }
 
 func TestSizeConsistencyVeto(t *testing.T) {
+	const budget = 50_000_000
 	cases := []struct {
 		name              string
 		units, entry, cap int64
-		vetoed            bool
+		vetoed            string // substring of the reason; empty = accepted
 	}{
 		// strategy 1909: units_used was the shard buy limit, capital priced on 10
-		{"1909 raw buy limit", 10_000, 1_491_846, 14_918_460, true},
-		{"1909 as priced", 10, 1_491_846, 14_918_460, false},
-		{"dose family 4x", 2_000, 25_840, 12_920_000, true},
-		{"rounded capital, 9% over", 109, 100_000, 10_000_000, false},
-		{"20% under", 80, 100_000, 10_000_000, true},
-		{"no capital: left to other rules", 10, 1_000, 0, false},
-		{"no units: left to other rules", 0, 1_000, 10_000, false},
+		{"1909 raw buy limit", 10_000, 1_491_846, 14_918_460, "over the 50000000 research budget"},
+		{"1909 as priced", 10, 1_491_846, 14_918_460, ""},
+		// Justiciar set: sized at its buy bound of 8, capital for one
+		{"big conversion at its buy bound", 8, 29_400_000, 29_400_000, "over the 50000000 research budget"},
+		{"big conversion sized by the budget", 1, 29_400_000, 29_400_000, ""},
+		{"dose family 4x", 2_000, 25_840, 12_920_000, "size fields disagree"},
+		{"capital 9% under units x entry", 109, 100_000, 10_000_000, ""},
+		{"capital 20% under units x entry", 125, 100_000, 10_000_000, "size fields disagree"},
+		{"overstated capital is not vetoed", 80, 100_000, 10_000_000, ""},
+		{"capital 0 still hits the budget", 10_000, 1_491_846, 0, "over the 50000000 research budget"},
+		{"capital 0 within budget", 10, 1_000, 0, ""},
+		{"no units: left to other rules", 0, 1_000, 10_000, ""},
 	}
 	for _, c := range cases {
 		st := store.SidecarStrategy{EntryPrice: c.entry, CapitalRequired: c.cap}
 		st.Size.UnitsUsed = c.units
-		reason := sizeConsistencyVeto(st)
-		if got := reason != ""; got != c.vetoed {
-			t.Errorf("%s: vetoed=%v (%q), want %v", c.name, got, reason, c.vetoed)
+		reason := sizeConsistencyVeto(st, budget)
+		if c.vetoed == "" && reason != "" {
+			t.Errorf("%s: vetoed %q, want accepted", c.name, reason)
 		}
-		if c.vetoed && !strings.Contains(reason, "size fields disagree") {
-			t.Errorf("%s: reason %q should name the disagreement", c.name, reason)
+		if c.vetoed != "" && !strings.Contains(reason, c.vetoed) {
+			t.Errorf("%s: reason %q, want one containing %q", c.name, reason, c.vetoed)
 		}
+	}
+}
+
+func TestSizeOverstatedCapitalIsOnlyNoted(t *testing.T) {
+	st := store.SidecarStrategy{EntryPrice: 100_000, CapitalRequired: 10_000_000}
+	st.Size.UnitsUsed = 80 // 8M of units against 10M of capital
+	if note := sizeOverstatedCapital(st); !strings.Contains(note, "not vetoed") {
+		t.Errorf("got %q, want an overstated-capital note", note)
+	}
+	st.Size.UnitsUsed = 100
+	if note := sizeOverstatedCapital(st); note != "" {
+		t.Errorf("consistent sizes: got note %q", note)
 	}
 }

@@ -21,9 +21,12 @@ import (
 // 1M high was 27 hours old against a fresh 134 low, a "979,866 margin" and
 // a 12.7B limit profit no one could take. Past 24h the margin, ROI and limit
 // profit are null (no current two-sided market); the prices and their times
-// still show. Limit profit is the margin times what one 4h window can
-// actually fill: the buy limit, capped at a sixth of the thinner side's 24h
-// volume (a Zamorak hilt trading 9 a day doesn't fill 10,000).
+// still show. Limit profit is an UPPER BOUND on one 4h window: the margin
+// times the buy limit, capped at a sixth of the thinner side's 24h volume
+// (all of an average 4h window; the harness itself assumes ~15% of it), so
+// a Zamorak hilt trading 9 a day doesn't claim 10,000. It is null, not 0,
+// when the buy limit is unknown (the ingester stores a missing /mapping
+// limit as 0) or the thinner side shows no 24h volume.
 
 // ItemRow is one item with its latest quote (last 14 days) and 24h volume.
 type ItemRow struct {
@@ -38,7 +41,7 @@ type ItemRow struct {
 	LowTime     *time.Time `json:"low_time"`
 	Margin      *int64     `json:"margin"`       // post-tax flip margin of that row; null unless both sides traded in 24h
 	ROIPct      *float64   `json:"roi_pct"`      // margin / low
-	LimitProfit *int64     `json:"limit_profit"` // margin x min(buy limit, thinner side's 24h volume / 6): one 4h window
+	LimitProfit *int64     `json:"limit_profit"` // upper bound: margin x min(buy limit, thinner side's 24h volume / 6); null if either is 0
 	HighVol24h  int64      `json:"high_vol_24h"`
 	LowVol24h   int64      `json:"low_vol_24h"`
 }
@@ -58,7 +61,7 @@ WITH vol AS (
 SELECT i.item_id, i.name, i.members, i.buy_limit, i.icon,
        p.high, p.high_time, p.low, p.low_time, m.margin,
        round(100.0 * m.margin / NULLIF(p.low, 0), 2),
-       CASE WHEN i.buy_limit IS NOT NULL THEN
+       CASE WHEN i.buy_limit > 0 AND least(coalesce(v.hv, 0), coalesce(v.lv, 0)) > 0 THEN
          round(m.margin * least(i.buy_limit::numeric,
                                 least(coalesce(v.hv, 0), coalesce(v.lv, 0)) / 6.0))::bigint
        END,
