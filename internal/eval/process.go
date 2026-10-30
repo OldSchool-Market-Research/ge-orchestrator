@@ -108,6 +108,9 @@ func (ev *Evaluator) computeProcess(ctx context.Context, st store.Strategy) (sto
 	if ok {
 		realized := int64(gpHr)
 		e.RealizedPer1hGp = &realized
+		// the scalar margin column: per action here, so the board reads it like any lane
+		perAction := int64(margin)
+		e.CurMargin = &perAction
 		detail["margin_haircut"], detail["actions_per_hour"], detail["gp_hr"] = margin, rate, gpHr
 	}
 	finishEvaluation(&e, checks, verdict, detail)
