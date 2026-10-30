@@ -288,15 +288,24 @@ func TestCalibrationLatestDropsStaleFamilyRows(t *testing.T) {
 	}
 	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.calibration
 		WHERE archetype IN ('C:teststale','C:testfresh') OR (archetype = 'C:set' AND factor = 0.5 AND n_closed = 10)`)
-	rows, err := s.CalibrationLatest(ctx)
-	if err != nil {
-		t.Fatal(err)
+	keys := func() map[string]bool {
+		rows, err := s.CalibrationLatest(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, r := range rows {
+			seen[r.Archetype] = true
+		}
+		return seen
 	}
-	seen := map[string]bool{}
-	for _, r := range rows {
-		seen[r.Archetype] = true
-	}
-	if seen["C:teststale"] || !seen["C:testfresh"] || !seen["C:set"] {
+	if seen := keys(); seen["C:teststale"] || !seen["C:testfresh"] || !seen["C:set"] {
 		t.Errorf("latest keys %v: want the fresh family and the old kind row, not the stale family", seen)
+	}
+	// After a cut, a fresh family row from the old epoch must not outrank the new
+	// regime's kind row. Those rows are at epoch 1, so epoch 2 is the cut here.
+	s.Epochs = map[string]int{"C": 2}
+	if seen := keys(); seen["C:testfresh"] {
+		t.Errorf("latest keys %v: a family row from before the cut must not survive it", seen)
 	}
 }

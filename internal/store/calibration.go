@@ -202,8 +202,10 @@ func (s *Store) CalibrationLatest(ctx context.Context) ([]CalibrationRow, error)
 	staleBefore := time.Now().AddDate(0, 0, -CalWindowDays)
 	for _, r := range all {
 		// A family row refreshes only when that family closes, so one the record
-		// steered turns away from would otherwise freeze and outrank its kind's.
-		if IsFamilyKey(r.Archetype) && r.ComputedAt.Before(staleBefore) {
+		// steered turns away from would otherwise freeze and outrank its kind's, and
+		// one from before a cut would outrank the new regime's. No family row at the
+		// current epoch just means the strategy falls through to its kind.
+		if IsFamilyKey(r.Archetype) && (r.ComputedAt.Before(staleBefore) || r.Epoch != s.EpochFor(r.Archetype)) {
 			continue
 		}
 		cur, ok := best[r.Archetype]
