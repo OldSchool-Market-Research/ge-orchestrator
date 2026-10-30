@@ -289,6 +289,9 @@ func (r *Runner) ingest(ctx context.Context, runID int64, p brief.Params, worksp
 	if err := r.Store.ReleaseRunSignals(ctx, runID); err != nil {
 		log.Printf("run %d: release unanswered signals: %v", runID, err)
 	}
+	if sc.ProposalsDropped > 0 {
+		log.Printf("run %d: agent dropped %d malformed or excess proposal(s)", runID, sc.ProposalsDropped)
+	}
 	r.fileProposals(ctx, runID, sc.Proposals)
 	return r.Store.FinishRun(ctx, runID, "succeeded", full, string(md), "")
 }

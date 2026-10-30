@@ -130,6 +130,8 @@ type Sidecar struct {
 	Strategies     []SidecarStrategy `json:"strategies"`
 	SignalVerdicts []SignalVerdict   `json:"signal_verdicts,omitempty"`
 	Proposals      []SidecarProposal `json:"proposals,omitempty"`
+	// how many the agent's parser dropped as malformed or over the limit
+	ProposalsDropped int `json:"proposals_dropped,omitempty"`
 }
 
 // evalWindowHours resolves the paper-trading window: the model's explicit

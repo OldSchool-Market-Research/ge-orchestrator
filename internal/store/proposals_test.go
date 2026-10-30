@@ -92,6 +92,13 @@ func TestProposalLifecycle(t *testing.T) {
 	if rejected[0].Evidence != "new evidence" || rejected[0].RunID != 3 {
 		t.Errorf("a repeat must show its own evidence and run: %+v", rejected[0])
 	}
+	lane.Evidence = ""
+	if _, err := s.InsertProposal(ctx, 4, lane, ""); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := s.Proposals(ctx, "rejected", 10); err != nil || again[0].Evidence != "new evidence" {
+		t.Errorf("a repeat with no evidence must keep what's on file: %+v %v", again, err)
+	}
 	if err := s.DecideProposal(ctx, 99999999, "accepted", ""); !errors.Is(err, ErrProposalNotFound) {
 		t.Errorf("unknown id: %v", err)
 	}

@@ -90,7 +90,8 @@ func (s *Store) InsertProposal(ctx context.Context, runID int64, p SidecarPropos
 		ON CONFLICT (fingerprint) DO UPDATE
 			SET times_proposed = orchestrator.proposals.times_proposed + 1, last_seen_at = now(),
 			    run_id = EXCLUDED.run_id, title = EXCLUDED.title, detail = EXCLUDED.detail,
-			    evidence = EXCLUDED.evidence, recipe = EXCLUDED.recipe, recipe_check = EXCLUDED.recipe_check
+			    evidence = COALESCE(NULLIF(EXCLUDED.evidence, ''), orchestrator.proposals.evidence),
+			    recipe = EXCLUDED.recipe, recipe_check = EXCLUDED.recipe_check
 		RETURNING (xmax = 0)`,
 		runID, p.Kind, p.Title, p.Detail, p.Evidence, recipe, check, proposalFingerprint(p)).Scan(&isNew)
 	return isNew, err
