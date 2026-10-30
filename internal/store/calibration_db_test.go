@@ -172,14 +172,21 @@ func TestScoreboardRatioReadsTheCurrentEpoch(t *testing.T) {
 		return nil, 0
 	}
 
-	for i := 0; i < scoreboardMinCloses; i++ {
+	// Earlier tests or runs can leave U rows behind; count from here.
+	if _, err := s.Pool.Exec(ctx, `DELETE FROM orchestrator.strategies WHERE archetype='U' AND state IN ('killed','expired','confirmed')`); err != nil {
+		t.Fatal(err)
+	}
+	ship(20)
+	_, base := ratio()
+	base--
+	for i := 1; i < scoreboardMinCloses; i++ {
 		ship(20) // the old epoch paces at 0.20
 	}
 	if got, _ := ratio(); got == nil || *got != 0.2 {
 		t.Fatalf("epoch 1 ratio %v", got)
 	}
 	s.Epochs = map[string]int{"U": 2}
-	if got, n := ratio(); got != nil || n != scoreboardMinCloses {
+	if got, n := ratio(); got != nil || n != base+scoreboardMinCloses {
 		t.Fatalf("a cut hides the ratio, not the counts: %v n=%d", got, n)
 	}
 	for i := 0; i < scoreboardMinCloses-1; i++ {
@@ -189,7 +196,7 @@ func TestScoreboardRatioReadsTheCurrentEpoch(t *testing.T) {
 		t.Fatalf("under the sample, no ratio: %v", *got)
 	}
 	ship(90)
-	if got, n := ratio(); got == nil || *got != 0.9 || n != 2*scoreboardMinCloses {
+	if got, n := ratio(); got == nil || *got != 0.9 || n != base+2*scoreboardMinCloses {
 		t.Fatalf("the new epoch's ratio alone: %v n=%d", got, n)
 	}
 }
