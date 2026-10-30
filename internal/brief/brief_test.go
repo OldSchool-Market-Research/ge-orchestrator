@@ -62,20 +62,17 @@ func TestCalOrderPutsKindsAfterTheirLane(t *testing.T) {
 
 func TestTrackAdviceReadsSurvival(t *testing.T) {
 	dead := &store.CalibrationRow{PSurvive: fp(0), NSurvived: 0, NClosed: 81, SurviveHours: 6}
-	if got := trackAdvice(81, 1.15, dead); !strings.Contains(got, "0 of 81") || strings.Contains(got, "keep mining") {
+	if got := trackAdvice(1.15, dead); !strings.Contains(got, "0 of 81") || strings.Contains(got, "keep mining") {
 		t.Errorf("a dead lane must not read as holding up: %q", got)
 	}
 	live := &store.CalibrationRow{PSurvive: fp(0.77), NSurvived: 134, NClosed: 174, SurviveHours: 6}
-	if got := trackAdvice(174, 0.9, live); !strings.Contains(got, "keep mining") {
+	if got := trackAdvice(0.9, live); !strings.Contains(got, "keep mining") {
 		t.Errorf("a surviving lane above the bar: %q", got)
 	}
-	if got := trackAdvice(174, 0.4, live); !strings.Contains(got, "have not held") {
+	if got := trackAdvice(0.4, live); !strings.Contains(got, "have not held") {
 		t.Errorf("a surviving lane under the bar: %q", got)
 	}
-	if got := trackAdvice(3, 1.15, dead); !strings.Contains(got, "insufficient") {
-		t.Errorf("a thin sample: %q", got)
-	}
-	if got := trackAdvice(20, 0.9, nil); !strings.Contains(got, "keep mining") {
+	if got := trackAdvice(0.9, nil); !strings.Contains(got, "keep mining") {
 		t.Errorf("no calibration row: %q", got)
 	}
 }

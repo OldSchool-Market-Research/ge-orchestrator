@@ -31,9 +31,10 @@ func TestSidecarRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Separate calls: one prepared statement can't hold two commands.
+	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.strategies WHERE run_id=$1`, runID)
 	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.evaluations WHERE strategy_id IN
-		(SELECT strategy_id FROM orchestrator.strategies WHERE run_id=$1);
-		DELETE FROM orchestrator.strategies WHERE run_id=$1`, runID)
+		(SELECT strategy_id FROM orchestrator.strategies WHERE run_id=$1)`, runID)
 
 	raw := `{
 	  "run_started_at": "2026-07-14T12:00:00Z", "report_path": "x.md",
