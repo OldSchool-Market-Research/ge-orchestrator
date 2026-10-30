@@ -82,6 +82,26 @@ func ProjectProcessPer1h(s *ProcessSnap, unitsUsed int64) *int64 {
 	return &v
 }
 
+// ProcessUnitsPer4h is a recipe's honest size per 4h, in whole actions: the lowest of
+// the player's speed, the buy limits, the market cap and the budget. It's ge-mcp
+// process_quote's units_per_4h, the number a strategy copies into size.units_used.
+// 0 when the recipe can't be sized.
+func ProcessUnitsPer4h(s *ProcessSnap, budgetGp int64) int64 {
+	if s == nil || s.GrossIn == nil || *s.GrossIn <= 0 || s.MarketRate == nil {
+		return 0
+	}
+	rate := (&Evaluator{}).participation() * *s.MarketRate
+	if budget := float64(budgetGp) / *s.GrossIn / flipCycleHours; budget < rate {
+		rate = budget
+	}
+	for _, bound := range []*float64{s.ActionsPerHour, s.LimitRate} {
+		if bound != nil && *bound < rate {
+			rate = *bound
+		}
+	}
+	return int64(rate * flipCycleHours)
+}
+
 // computeProcess evaluates a P strategy. Realized is per hour of PLAY, not per hour
 // the strategy is open: nobody clicks for 48 hours straight, so it paces the recipe
 // against its projection and never adds up as gp (store.PnL leaves P out).

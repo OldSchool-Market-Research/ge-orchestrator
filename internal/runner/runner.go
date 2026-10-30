@@ -133,6 +133,8 @@ func (r *Runner) execute(runID int64, workspace, briefPath string, run *activeRu
 	}()
 	ctx := context.Background()
 
+	go r.logProcessPacket(runID, run.params)
+
 	cmd := exec.Command(r.Cfg.AgentPath)
 	cmd.Dir = workspace
 	cmd.Env = append([]string{
@@ -269,6 +271,7 @@ func (r *Runner) ingest(ctx context.Context, runID int64, p brief.Params, worksp
 	if err := r.Store.LinkSignalStrategies(ctx, runID); err != nil {
 		log.Printf("run %d: link signals: %v", runID, err)
 	}
+	r.logPacketComparison(ctx, runID)
 	if r.Notify != nil {
 		// The ping gate weighs projections by the same calibration rows
 		// the vetter just used — a re-fetch keeps the coupling loose and the

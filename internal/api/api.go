@@ -50,6 +50,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/calibration", s.calibration)
 	mux.HandleFunc("GET /api/allocation", s.allocation)
 	mux.HandleFunc("GET /api/regime", s.regime)
+	mux.HandleFunc("GET /api/packets", s.packets)
 	mux.HandleFunc("GET /api/proposals", s.listProposals)
 	mux.HandleFunc("POST /api/proposals/{id}/decision", s.decideProposal)
 	mux.HandleFunc("GET /api/items", s.listItems)
@@ -94,6 +95,23 @@ func (s *Server) allocation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"latest": latest, "history": history})
+}
+
+// packets serves lane P's script-built packets against what each run's model pitched,
+// newest first. Log mode: no run reads them yet.
+func (s *Server) packets(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+	runs, summary, err := s.Store.PacketRuns(r.Context(), 0, limit)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"mode": "log", "summary": summary, "runs": runs})
 }
 
 // listProposals serves what the agent suggested, open ones first. ?status filters.
