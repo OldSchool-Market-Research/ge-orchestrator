@@ -25,8 +25,8 @@ import (
 // times the buy limit, capped at a sixth of the thinner side's 24h volume
 // (all of an average 4h window; the harness itself assumes ~15% of it), so
 // a Zamorak hilt trading 9 a day doesn't claim 10,000. It is null, not 0,
-// when the buy limit is unknown (the ingester stores a missing /mapping
-// limit as 0) or the thinner side shows no 24h volume.
+// when the buy limit is unknown (NULL, or 0 for the two items /mapping lists
+// at 0) or the thinner side shows no 24h volume.
 
 // ItemRow is one item with its latest quote (last 14 days) and 24h volume.
 type ItemRow struct {
@@ -41,7 +41,7 @@ type ItemRow struct {
 	LowTime     *time.Time `json:"low_time"`
 	Margin      *int64     `json:"margin"`       // post-tax flip margin of that row; null unless both sides traded in 24h
 	ROIPct      *float64   `json:"roi_pct"`      // margin / low
-	LimitProfit *int64     `json:"limit_profit"` // upper bound: margin x min(buy limit, thinner side's 24h volume / 6); null if either is 0
+	LimitProfit *int64     `json:"limit_profit"` // upper bound: margin x min(buy limit, thinner side's 24h volume / 6); null if either is 0 or unknown
 	HighVol24h  int64      `json:"high_vol_24h"`
 	LowVol24h   int64      `json:"low_vol_24h"`
 }
