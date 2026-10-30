@@ -133,7 +133,7 @@ func (r *Runner) execute(runID int64, workspace, briefPath string, run *activeRu
 	}()
 	ctx := context.Background()
 
-	r.logProcessPacket(runID, run.params)
+	go r.logProcessPacket(runID, run.params)
 
 	cmd := exec.Command(r.Cfg.AgentPath)
 	cmd.Dir = workspace

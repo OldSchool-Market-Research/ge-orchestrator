@@ -1,10 +1,17 @@
 package runner
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/osrs-ge/ge-orchestrator/internal/brief"
 	"github.com/osrs-ge/ge-orchestrator/internal/eval"
 	"github.com/osrs-ge/ge-orchestrator/internal/store"
 )
@@ -21,29 +28,42 @@ func goodRecipe() *eval.ProcessSnap {
 
 func TestJudgeRecipeShips(t *testing.T) {
 	row := store.PacketRow{RecipeID: 26, Hours24h: 24, HoursAtFloor24h: 24}
-	judgeRecipe(&row, goodRecipe(), testBudget)
+	judgeRecipe(&row, goodRecipe(), 0, testBudget)
 	if !row.Ship || row.Why != "" {
 		t.Fatalf("ship %v, why %q", row.Ship, row.Why)
 	}
-	if row.UnitsPer4h != 5_760 || row.GpHr == nil || *row.GpHr != 408_240 {
-		t.Errorf("units %d, gp/hr %v", row.UnitsPer4h, row.GpHr)
+	if row.UnitsPer4h == nil || *row.UnitsPer4h != 5_760 || row.GpHr == nil || *row.GpHr != 408_240 {
+		t.Errorf("units %v, gp/hr %v", row.UnitsPer4h, row.GpHr)
 	}
 	if row.OutputItem == nil || *row.OutputItem != 8782 {
 		t.Errorf("output %v", row.OutputItem)
 	}
 }
 
-// A shipped verdict must be one the vet's lane P rules would accept: same snapshot,
-// the size the row says, the same projection.
-func TestJudgeRecipeAgreesWithTheVet(t *testing.T) {
-	snap := goodRecipe()
-	row := store.PacketRow{Hours24h: 24, HoursAtFloor24h: 24}
-	judgeRecipe(&row, snap, testBudget)
-	if reason := processVeto(snap, eval.ProjectProcessPer1h(snap, row.UnitsPer4h)); reason != "" {
-		t.Errorf("vet refused a shipped row: %s", reason)
-	}
-	if reason := processPersistenceVeto(row.HoursAtFloor24h, row.Hours24h); reason != "" {
-		t.Errorf("vet refused a shipped row: %s", reason)
+// A budget-bound recipe whose fee pushes units x entry over the vet's size rule: the
+// bound on units leaves the fee out, and the entry_price a strategy copies includes it.
+func TestJudgeRecipeAppliesTheVetsSizeRule(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	s := goodRecipe()
+	// 100k input at 50M budget: 500 actions per 4h, 125/hr, 1.4M margin an action.
+	s.GrossIn, s.GrossOut, s.MarginSlow = f(100_000), f(2_000_000), f(1_400_000)
+	for _, c := range []struct {
+		name string
+		fee  float64
+		ship bool
+	}{
+		{"no fee", 0, true},
+		{"fee inside the tolerance", 10_000, true},
+		{"fee over it", 10_001, false},
+	} {
+		row := store.PacketRow{Hours24h: 24, HoursAtFloor24h: 24}
+		judgeRecipe(&row, s, c.fee, testBudget)
+		if row.Ship != c.ship {
+			t.Errorf("%s: ship %v, why %q", c.name, row.Ship, row.Why)
+		}
+		if !c.ship && !strings.Contains(row.Why, "over the 50000000 research budget") {
+			t.Errorf("%s: why %q", c.name, row.Why)
+		}
 	}
 }
 
@@ -74,7 +94,7 @@ func TestJudgeRecipeBlocks(t *testing.T) {
 		s := goodRecipe()
 		c.change(s)
 		row := store.PacketRow{Hours24h: c.hours, HoursAtFloor24h: c.at}
-		judgeRecipe(&row, s, testBudget)
+		judgeRecipe(&row, s, 0, testBudget)
 		if row.Ship {
 			t.Errorf("%s: shipped", c.name)
 		}
@@ -87,8 +107,8 @@ func TestJudgeRecipeBlocks(t *testing.T) {
 		if c.wantNilGp && row.GpHr != nil {
 			t.Errorf("%s: gp/hr %d, want null", c.name, *row.GpHr)
 		}
-		if c.wantNoSize && row.UnitsPer4h != 0 {
-			t.Errorf("%s: units %d", c.name, row.UnitsPer4h)
+		if c.wantNoSize && row.UnitsPer4h != nil {
+			t.Errorf("%s: units %d, want null", c.name, *row.UnitsPer4h)
 		}
 	}
 }
@@ -142,5 +162,110 @@ func TestSortPacket(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, []int{3, 1, 2, 4, 5}) {
 		t.Errorf("order %v", got)
+	}
+}
+
+// With no price source or the lane off, a build stops before touching the store, which
+// is nil here: reaching it would panic.
+func TestLogProcessPacketSkips(t *testing.T) {
+	(&Runner{}).logProcessPacket(1, brief.Params{})
+	r := &Runner{Prices: scriptedPrices{}}
+	r.logProcessPacket(1, brief.Params{Archetypes: map[string]float64{"P": 0}})
+}
+
+// scriptedPrices answers ProcessSnapshot only: the packet reads nothing else from it.
+type scriptedPrices struct {
+	eval.PriceSource
+	snap func(int) (*eval.ProcessSnap, error)
+}
+
+func (s scriptedPrices) ProcessSnapshot(_ context.Context, id int) (*eval.ProcessSnap, error) {
+	return s.snap(id)
+}
+
+// TestBuildProcessPacket walks the build over the seeded recipes: a failed lookup is
+// that recipe's verdict, the deadline fails the whole packet, and an open strategy
+// blocks its item. Needs a migrated scratch DB: set STORE_TEST_DSN; skipped otherwise.
+func TestBuildProcessPacket(t *testing.T) {
+	dsn := os.Getenv("STORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("STORE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := store.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	recipes, err := s.ProcessQuotes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recipes) == 0 {
+		t.Skip("no recipes seeded")
+	}
+
+	// A lookup failure blocks that recipe and only that recipe.
+	failing := recipes[0].RecipeID
+	r := &Runner{Store: s, Cfg: Config{GraveyardCooldown: time.Hour}, Prices: scriptedPrices{snap: func(id int) (*eval.ProcessSnap, error) {
+		if id == failing {
+			return nil, errors.New("boom")
+		}
+		return goodRecipe(), nil
+	}}}
+	p := brief.Defaults()
+	rows, err := r.buildProcessPacket(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != len(recipes) {
+		t.Fatalf("%d rows for %d recipes", len(rows), len(recipes))
+	}
+	for _, row := range rows {
+		if row.RecipeID == failing && !strings.Contains(row.Why, "boom") {
+			t.Errorf("failed lookup: %+v", row)
+		}
+		if row.RecipeID != failing && strings.Contains(row.Why, "boom") {
+			t.Errorf("recipe %d took another's failure: %q", row.RecipeID, row.Why)
+		}
+	}
+
+	// A deadline fails the packet, rather than storing every recipe as "lookup failed".
+	done, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := r.buildProcessPacket(done, p); err == nil {
+		t.Error("a cancelled build returned rows")
+	}
+
+	// An open P strategy blocks its item; another item still ships.
+	const item, other = 876571, 876572
+	if _, err := s.OrphanRunningRuns(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := s.CreateRun(ctx, json.RawMessage(`{}`), "test brief", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.OrphanRunningRuns(ctx)
+	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.strategies WHERE run_id=$1`, runID)
+	var st store.SidecarStrategy
+	raw := fmt.Sprintf(`{"id":"P-packet-dedup","archetype":"P","title":"t","thesis":"t",
+		"items":[{"name":"x","id":%d}],"entry":"e","exit":"x","entry_price":1,"exit_price":2,
+		"horizon":"h","capital_required":1,"size":{"buy_limit":1,"vol_constrained":1,"units_used":1},
+		"expected_value":{"per_cycle_gp":1,"per_1h_gp":1,"per_day_gp":1,"roi_pct":1},
+		"confidence":"medium","invalidation":"i"}`, item)
+	if err := json.Unmarshal([]byte(raw), &st); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertStrategies(ctx, runID, time.Now().UTC(), []store.SidecarStrategy{st}, nil); err != nil {
+		t.Fatal(err)
+	}
+	book := []store.PacketRow{packetRow(1, item, 300_000), packetRow(2, other, 300_000)}
+	r.blockOnRecord(ctx, book)
+	if book[0].Ship || !strings.Contains(book[0].Why, "already has an open P strategy") {
+		t.Errorf("open item: %+v", book[0])
+	}
+	if !book[1].Ship {
+		t.Errorf("other item: %+v", book[1])
 	}
 }

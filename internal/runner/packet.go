@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -18,11 +19,11 @@ import (
 // Each read is the vet's own per-recipe query, which is cheap at this scale: 254
 // recipes took about a second on prod, once per run.
 
-// packetTimeout bounds a build, so a slow database can't hold a run back for long.
+// packetTimeout bounds a build, so a slow database can't leave one hanging.
 const packetTimeout = time.Minute
 
-// logProcessPacket stores the packet for a run about to start. Nothing depends on it,
-// so any failure only costs the row.
+// logProcessPacket stores the packet for a run that's starting, beside the run rather
+// than ahead of it. Nothing depends on it, so any failure only costs the row.
 func (r *Runner) logProcessPacket(runID int64, p brief.Params) {
 	if r.Prices == nil {
 		return
@@ -85,7 +86,7 @@ func (r *Runner) buildProcessPacket(ctx context.Context, p brief.Params) ([]stor
 		if err != nil {
 			row.Why = "lookup failed: " + err.Error()
 		} else {
-			judgeRecipe(&row, snap, p.CapitalGp)
+			judgeRecipe(&row, snap, q.FeeGp, p.CapitalGp)
 		}
 		rows = append(rows, row)
 	}
@@ -100,13 +101,17 @@ func (r *Runner) buildProcessPacket(ctx context.Context, p brief.Params) ([]stor
 
 // judgeRecipe applies the vet's lane P rules to a recipe at its honest size: the size
 // a strategy would copy, so the projection is the one the vet would compute.
-func judgeRecipe(row *store.PacketRow, snap *eval.ProcessSnap, budgetGp int64) {
+func judgeRecipe(row *store.PacketRow, snap *eval.ProcessSnap, feeGp float64, budgetGp int64) {
 	row.OutputItem, row.MaxLegAgeS = snap.OutputItem, snap.MaxLegAgeS
-	row.UnitsPer4h = eval.ProcessUnitsPer4h(snap, budgetGp)
-	if row.UnitsPer4h > 0 { // 0 would project at the market rate, not at no size
-		row.GpHr = eval.ProjectProcessPer1h(snap, row.UnitsPer4h)
+	why := ""
+	if units := eval.ProcessUnitsPer4h(snap, budgetGp); units > 0 { // 0 would project at the market rate, not at no size
+		row.UnitsPer4h = &units
+		row.GpHr = eval.ProjectProcessPer1h(snap, units)
+		why = sizeConsistencyVeto(copiedSize(units, *snap.GrossIn, feeGp), budgetGp)
 	}
-	why := processVeto(snap, row.GpHr)
+	if why == "" {
+		why = processVeto(snap, row.GpHr)
+	}
 	if why == "" {
 		why = processPersistenceVeto(row.HoursAtFloor24h, row.Hours24h)
 	}
@@ -117,8 +122,18 @@ func judgeRecipe(row *store.PacketRow, snap *eval.ProcessSnap, budgetGp int64) {
 	row.Ship = why == ""
 }
 
+// copiedSize is the size fields a strategy would copy from process_quote: its
+// entry_price includes the recipe's fee, which the budget bound on units doesn't.
+func copiedSize(units int64, grossIn, feeGp float64) store.SidecarStrategy {
+	var st store.SidecarStrategy
+	st.Size.UnitsUsed = units
+	st.EntryPrice = int64(math.Round(grossIn + feeGp))
+	st.CapitalRequired = units * st.EntryPrice
+	return st
+}
+
 // keepBestPerOutput leaves one shippable recipe per output item, the best paid: the
-// dedup keys on the item, so the book can hold only one of them.
+// dedup keys on the item, so recipes sharing one compete for its place on the book.
 func keepBestPerOutput(rows []store.PacketRow) {
 	best := map[int]int{}
 	for i := range rows {

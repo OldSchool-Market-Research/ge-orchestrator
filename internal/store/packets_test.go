@@ -50,6 +50,19 @@ func TestComparePacketVetoedPickIsNotBoth(t *testing.T) {
 	if len(run.Both) != 0 || !reflect.DeepEqual(run.ScriptOnly, []int{1}) || len(run.Vetoed) != 1 {
 		t.Errorf("both %v, script only %v, vetoed %v", run.Both, run.ScriptOnly, run.Vetoed)
 	}
+	if !reflect.DeepEqual(run.ScriptVetoed, []int{1}) {
+		t.Errorf("script vetoed %v", run.ScriptVetoed)
+	}
+}
+
+// A vetoed pitch of a recipe the script also refused is agreement, not drift.
+func TestComparePacketVetoedPickOfRefusedRecipeIsNotDrift(t *testing.T) {
+	id := 1
+	var run PacketRun
+	comparePacket(&run, []PacketRow{{RecipeID: 1, Why: "under the floor"}}, []PacketPick{{RecipeID: &id, Sid: "P-x", State: "vetoed"}})
+	if len(run.ScriptVetoed) != 0 || len(run.Vetoed) != 1 || run.Vetoed[0].ScriptWhy != "under the floor" {
+		t.Errorf("script vetoed %v, vetoed %+v", run.ScriptVetoed, run.Vetoed)
+	}
 }
 
 // No pitches still serializes as empty lists, not nulls.
@@ -64,7 +77,7 @@ func TestComparePacketEmpty(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"script", "both", "script_only", "model_only", "model_vetoed"} {
+	for _, k := range []string{"script", "both", "script_only", "script_vetoed", "model_only", "model_vetoed"} {
 		if _, ok := got[k].([]any); !ok {
 			t.Errorf("%s = %v, want an empty list", k, got[k])
 		}
@@ -73,10 +86,10 @@ func TestComparePacketEmpty(t *testing.T) {
 
 func TestSummarizePacketsCountsSucceededRunsOnly(t *testing.T) {
 	ok := PacketRun{RunStatus: "succeeded", Script: []PacketRow{{RecipeID: 1}, {RecipeID: 2}}, Both: []int{1}, ScriptOnly: []int{2},
-		ModelOnly: []PacketPick{{Sid: "a"}}, Vetoed: []PacketPick{{Sid: "b"}}}
+		ScriptVetoed: []int{2}, ModelOnly: []PacketPick{{Sid: "a"}}, Vetoed: []PacketPick{{Sid: "b"}}}
 	failed := PacketRun{RunStatus: "failed", Script: []PacketRow{{RecipeID: 3}}, ScriptOnly: []int{3}}
 	got := summarizePackets([]PacketRun{ok, failed})
-	want := PacketSummary{Runs: 1, Script: 2, Model: 2, Both: 1, ScriptOnly: 1, ModelOnly: 1, Vetoed: 1}
+	want := PacketSummary{Runs: 1, Script: 2, Model: 2, Both: 1, ScriptOnly: 1, ScriptVetoed: 1, ModelOnly: 1, Vetoed: 1}
 	if got != want {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
@@ -107,9 +120,9 @@ func TestLanePacketRoundTrip(t *testing.T) {
 	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.lane_packets WHERE run_id=$1`, runID)
 	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.strategies WHERE run_id=$1`, runID)
 
-	gp := int64(400_000)
+	gp, units := int64(400_000), int64(5760)
 	if err := s.InsertLanePacket(ctx, runID, []PacketRow{
-		{RecipeID: 26, Name: "Mahogany Plank", OutputItem: intPtr(8782), GpHr: &gp, UnitsPer4h: 5760, Hours24h: 24, HoursAtFloor24h: 24, Ship: true},
+		{RecipeID: 26, Name: "Mahogany Plank", OutputItem: intPtr(8782), GpHr: &gp, UnitsPer4h: &units, Hours24h: 24, HoursAtFloor24h: 24, Ship: true},
 		{RecipeID: 31, Name: "Thin one", Why: "under the floor"},
 	}); err != nil {
 		t.Fatal(err)

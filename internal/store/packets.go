@@ -13,14 +13,16 @@ import (
 // passed it, since the script's list has been through the same rules.
 
 // PacketRow is one recipe's verdict. Nil numbers are NULLs kept as NULLs: a nil GpHr
-// is a recipe that can't be priced or doesn't earn, never a zero.
+// is a recipe that can't be priced or doesn't earn, and nil UnitsPer4h one that can't
+// be sized, never a zero. The hours count snapshots; both are 0 on a failed lookup,
+// which Why names.
 type PacketRow struct {
 	RecipeID        int    `json:"recipe_id"`
 	Name            string `json:"name"`
 	Category        string `json:"category"`
 	OutputItem      *int   `json:"output_item"`
 	GpHr            *int64 `json:"gp_hr"`
-	UnitsPer4h      int64  `json:"units_per_4h"`
+	UnitsPer4h      *int64 `json:"units_per_4h"`
 	Hours24h        int    `json:"hours_24h"`
 	HoursAtFloor24h int    `json:"hours_at_floor_24h"`
 	MaxLegAgeS      *int64 `json:"max_leg_age_s"`
@@ -39,28 +41,33 @@ type PacketPick struct {
 
 // PacketRun is one run's packet against its pitches. Only the rows the script would
 // ship come back: the rest stay in the table, reachable through a pick's ScriptWhy.
+// ScriptVetoed is the drift signal: recipes the script ships whose pitch the vet
+// refused at ingest, because the rules differ or the market moved during the run.
+// They also count in ScriptOnly, as the model's strategy never entered the book.
 type PacketRun struct {
-	RunID      int64        `json:"run_id"`
-	RunStatus  string       `json:"run_status"`
-	BuiltAt    time.Time    `json:"built_at"`
-	Judged     int          `json:"judged"`
-	Script     []PacketRow  `json:"script"`
-	Both       []int        `json:"both"`
-	ScriptOnly []int        `json:"script_only"`
-	ModelOnly  []PacketPick `json:"model_only"`
-	Vetoed     []PacketPick `json:"model_vetoed"`
+	RunID        int64        `json:"run_id"`
+	RunStatus    string       `json:"run_status"`
+	BuiltAt      time.Time    `json:"built_at"`
+	Judged       int          `json:"judged"`
+	Script       []PacketRow  `json:"script"`
+	Both         []int        `json:"both"`
+	ScriptOnly   []int        `json:"script_only"`
+	ScriptVetoed []int        `json:"script_vetoed"`
+	ModelOnly    []PacketPick `json:"model_only"`
+	Vetoed       []PacketPick `json:"model_vetoed"`
 }
 
 // PacketSummary totals the succeeded runs: a failed run pitched nothing, which says
-// nothing about the script.
+// nothing about the script. Model counts the pitches the vet passed; Vetoed the rest.
 type PacketSummary struct {
-	Runs       int `json:"runs"`
-	Script     int `json:"script"`
-	Model      int `json:"model"`
-	Both       int `json:"both"`
-	ScriptOnly int `json:"script_only"`
-	ModelOnly  int `json:"model_only"`
-	Vetoed     int `json:"model_vetoed"`
+	Runs         int `json:"runs"`
+	Script       int `json:"script"`
+	Model        int `json:"model"`
+	Both         int `json:"both"`
+	ScriptOnly   int `json:"script_only"`
+	ScriptVetoed int `json:"script_vetoed"`
+	ModelOnly    int `json:"model_only"`
+	Vetoed       int `json:"model_vetoed"`
 }
 
 // InsertLanePacket records a run's lane P packet.
@@ -145,7 +152,7 @@ func (s *Store) PacketRuns(ctx context.Context, runID int64, limit int) ([]Packe
 // comparePacket fills a run's comparison from its packet rows and its pitches.
 func comparePacket(run *PacketRun, rows []PacketRow, picks []PacketPick) {
 	run.Judged = len(rows)
-	run.Script, run.Both, run.ScriptOnly = []PacketRow{}, []int{}, []int{}
+	run.Script, run.Both, run.ScriptOnly, run.ScriptVetoed = []PacketRow{}, []int{}, []int{}, []int{}
 	run.ModelOnly, run.Vetoed = []PacketPick{}, []PacketPick{}
 	byRecipe := make(map[int]PacketRow, len(rows))
 	for _, r := range rows {
@@ -165,6 +172,9 @@ func comparePacket(run *PacketRun, rows []PacketRow, picks []PacketPick) {
 		}
 		if pk.State == "vetoed" {
 			run.Vetoed = append(run.Vetoed, pk)
+			if pk.RecipeID != nil && byRecipe[*pk.RecipeID].Ship {
+				run.ScriptVetoed = append(run.ScriptVetoed, *pk.RecipeID)
+			}
 			continue
 		}
 		if pk.RecipeID != nil {
@@ -184,6 +194,7 @@ func comparePacket(run *PacketRun, rows []PacketRow, picks []PacketPick) {
 	}
 	sort.Ints(run.Both)
 	sort.Ints(run.ScriptOnly)
+	sort.Ints(run.ScriptVetoed)
 }
 
 func summarizePackets(runs []PacketRun) PacketSummary {
@@ -197,6 +208,7 @@ func summarizePackets(runs []PacketRun) PacketSummary {
 		sum.Model += len(r.Both) + len(r.ModelOnly)
 		sum.Both += len(r.Both)
 		sum.ScriptOnly += len(r.ScriptOnly)
+		sum.ScriptVetoed += len(r.ScriptVetoed)
 		sum.ModelOnly += len(r.ModelOnly)
 		sum.Vetoed += len(r.Vetoed)
 	}
