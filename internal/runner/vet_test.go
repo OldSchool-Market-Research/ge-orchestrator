@@ -300,3 +300,31 @@ func TestComboRecipeVetoNoArb(t *testing.T) {
 		t.Errorf("13.2M margin on a 90 Prayer combine should pass (skill-gated), got %q", reason)
 	}
 }
+
+func TestSizeConsistencyVeto(t *testing.T) {
+	cases := []struct {
+		name              string
+		units, entry, cap int64
+		vetoed            bool
+	}{
+		// strategy 1909: units_used was the shard buy limit, capital priced on 10
+		{"1909 raw buy limit", 10_000, 1_491_846, 14_918_460, true},
+		{"1909 as priced", 10, 1_491_846, 14_918_460, false},
+		{"dose family 4x", 2_000, 25_840, 12_920_000, true},
+		{"rounded capital, 9% over", 109, 100_000, 10_000_000, false},
+		{"20% under", 80, 100_000, 10_000_000, true},
+		{"no capital: left to other rules", 10, 1_000, 0, false},
+		{"no units: left to other rules", 0, 1_000, 10_000, false},
+	}
+	for _, c := range cases {
+		st := store.SidecarStrategy{EntryPrice: c.entry, CapitalRequired: c.cap}
+		st.Size.UnitsUsed = c.units
+		reason := sizeConsistencyVeto(st)
+		if got := reason != ""; got != c.vetoed {
+			t.Errorf("%s: vetoed=%v (%q), want %v", c.name, got, reason, c.vetoed)
+		}
+		if c.vetoed && !strings.Contains(reason, "size fields disagree") {
+			t.Errorf("%s: reason %q should name the disagreement", c.name, reason)
+		}
+	}
+}
