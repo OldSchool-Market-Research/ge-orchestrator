@@ -4,6 +4,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -49,6 +50,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/calibration", s.calibration)
 	mux.HandleFunc("GET /api/allocation", s.allocation)
 	mux.HandleFunc("GET /api/regime", s.regime)
+	mux.HandleFunc("GET /api/proposals", s.listProposals)
+	mux.HandleFunc("POST /api/proposals/{id}/decision", s.decideProposal)
 	mux.HandleFunc("GET /api/items", s.listItems)
 	mux.HandleFunc("GET /api/items/{id}", s.getItem)
 	mux.HandleFunc("GET /api/items/{id}/history", s.itemHistory)
@@ -91,6 +94,52 @@ func (s *Server) allocation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"latest": latest, "history": history})
+}
+
+// listProposals serves what the agent suggested, open ones first. ?status filters.
+func (s *Server) listProposals(w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	switch status {
+	case "", "open", "accepted", "rejected":
+	default:
+		writeErr(w, 400, "status must be open, accepted or rejected")
+		return
+	}
+	list, err := s.Store.Proposals(r.Context(), status, 200)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, list)
+}
+
+// decideProposal records the operator's call on one proposal.
+func (s *Server) decideProposal(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	var body struct {
+		Status string `json:"status"`
+		Note   string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, 400, "bad body: "+err.Error())
+		return
+	}
+	if body.Status != "accepted" && body.Status != "rejected" && body.Status != "open" {
+		writeErr(w, 400, "status must be accepted, rejected or open")
+		return
+	}
+	switch err := s.Store.DecideProposal(r.Context(), id, body.Status, body.Note); {
+	case errors.Is(err, store.ErrProposalNotFound):
+		writeErr(w, 404, err.Error())
+	case err != nil:
+		writeErr(w, 500, err.Error())
+	default:
+		writeJSON(w, 200, map[string]any{"proposal_id": id, "status": body.Status})
+	}
 }
 
 func (s *Server) regime(w http.ResponseWriter, r *http.Request) {

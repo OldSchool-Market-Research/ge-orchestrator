@@ -289,7 +289,79 @@ func (r *Runner) ingest(ctx context.Context, runID int64, p brief.Params, worksp
 	if err := r.Store.ReleaseRunSignals(ctx, runID); err != nil {
 		log.Printf("run %d: release unanswered signals: %v", runID, err)
 	}
+	if sc.ProposalsDropped > 0 {
+		log.Printf("run %d: agent dropped %d malformed or excess proposal(s)", runID, sc.ProposalsDropped)
+	}
+	r.fileProposals(ctx, runID, sc.Proposals)
 	return r.Store.FinishRun(ctx, runID, "succeeded", full, string(md), "")
+}
+
+// fileProposals stores what the agent suggested. Best-effort: a proposal never
+// costs a run its ships. A recipe already in the table is dropped, since the agent
+// can't see the whole table at once.
+func (r *Runner) fileProposals(ctx context.Context, runID int64, list []store.SidecarProposal) {
+	for _, p := range list {
+		check := ""
+		if p.Kind == "recipe" && p.Recipe != nil {
+			name, err := r.Store.RecipeOnFile(ctx, *p.Recipe)
+			if err != nil {
+				log.Printf("run %d: proposal %q: recipe lookup: %v", runID, p.Title, err)
+			} else if name != "" {
+				log.Printf("run %d: proposal %q is already recipe %q, dropped", runID, p.Title, name)
+				continue
+			}
+			check = r.checkRecipe(ctx, *p.Recipe)
+		}
+		isNew, err := r.Store.InsertProposal(ctx, runID, p, check)
+		if err != nil {
+			log.Printf("run %d: proposal %q: %v", runID, p.Title, err)
+			continue
+		}
+		log.Printf("run %d: proposal %q (%s, new=%v)", runID, p.Title, p.Kind, isNew)
+	}
+}
+
+// checkRecipe is the harness's own read of a proposed recipe, for the person
+// deciding: do its items exist, and what does it pay right now? The model's claim
+// isn't evidence. A margin says nothing about whether the recipe is real, and a
+// missing component is what makes a phantom one look rich.
+func (r *Runner) checkRecipe(ctx context.Context, rec store.ProposedRecipe) string {
+	var ids []int
+	for _, l := range append(append([]store.RelationLeg{}, rec.Inputs...), rec.Outputs...) {
+		ids = append(ids, l.ItemID)
+	}
+	names, err := r.Store.ItemNames(ctx, ids)
+	if err != nil {
+		return "item lookup failed: " + err.Error()
+	}
+	var unknown []string
+	for _, id := range ids {
+		if _, ok := names[id]; !ok {
+			unknown = append(unknown, fmt.Sprintf("%d", id))
+		}
+	}
+	if len(unknown) > 0 {
+		return "unknown item ids: " + strings.Join(unknown, ", ")
+	}
+	describe := func(legs []store.RelationLeg) string {
+		parts := make([]string, len(legs))
+		for i, l := range legs {
+			parts[i] = fmt.Sprintf("%d x %s", l.Qty, names[l.ItemID])
+		}
+		return strings.Join(parts, " + ")
+	}
+	out := describe(rec.Inputs) + " -> " + describe(rec.Outputs)
+	if r.Prices == nil {
+		return out
+	}
+	snaps, err := r.Prices.SnapshotMany(ctx, ids)
+	if err != nil {
+		return out + "; pricing failed: " + err.Error()
+	}
+	if margin, ok := eval.RecipeMargin(rec.Inputs, rec.Outputs, snaps); ok {
+		return fmt.Sprintf("%s; margin now %d gp per conversion (buy at low, sell at high, after tax)", out, margin)
+	}
+	return out + "; a leg has no price right now"
 }
 
 func (r *Runner) fail(ctx context.Context, runID int64, reason string) {

@@ -67,6 +67,26 @@ const (
 	legFreshMaxAgeS = 6 * 3600
 )
 
+// RecipeMargin prices a recipe at the latest quotes, buying inputs at the low and
+// selling outputs at the high after tax. ok is false when a leg has no price.
+func RecipeMargin(inputs, outputs []store.RelationLeg, snaps map[int]*Snap) (margin int64, ok bool) {
+	for _, l := range inputs {
+		snap := snaps[l.ItemID]
+		if snap == nil || snap.Low == nil {
+			return 0, false
+		}
+		margin -= *snap.Low * l.Qty
+	}
+	for _, l := range outputs {
+		snap := snaps[l.ItemID]
+		if snap == nil || snap.High == nil {
+			return 0, false
+		}
+		margin += (*snap.High - sellTax(*snap.High)) * l.Qty
+	}
+	return margin, true
+}
+
 // legConversions is how many conversions per 4h a leg supports at participation,
 // from its real trailing 4h volume. A 30-minute window x 8 reads 0 for any leg that
 // didn't print in the last half hour, which rounded conversions to 0 and zeroed
@@ -211,7 +231,7 @@ func (ev *Evaluator) computeCombo(ctx context.Context, st store.Strategy) (store
 	e := baseEvaluation(st, now, snaps[st.PrimaryItemID])
 	e.RealizedPer1hGp = realizedPer1h
 	finishEvaluation(&e, checks, verdict, map[string]any{
-		"legs": legDetails,
+		"legs":             legDetails,
 		"combo_margin_now": marginNowRaw, "combo_margin_haircut": marginNowHaircut,
 		"projected_margin": projected, "kill_bar_gp": killBar,
 		"realized_raw_per_1h": rawPer1h, "realized_haircut_per_1h": realizedPer1h,
