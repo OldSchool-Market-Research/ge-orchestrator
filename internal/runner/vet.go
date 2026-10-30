@@ -47,14 +47,15 @@ const (
 	// sizeConsistencyTolerance bounds how far units_used x entry_price may
 	// run ABOVE capital_required (and above the research budget): both
 	// describe ONE batch. On prod (60 days to 2026-10-29) 90% of C and 96%
-	// of F ships agree within it. Of the 50 accepted outliers, 30 overstate
-	// units: 1909's units_used was the raw shard buy limit (1000x its
-	// capital), the 1606/1724 dose family 4x, and 19 big-ticket conversions
-	// sized at their buy bound with capital for one (a Justiciar set at 8 x
-	// 29.4M). The evaluator sizes its volume check and the dashboard its
-	// shopping list from units_used, so an overstated one poisons both
-	// while the money fields look right. The other 20 overstate capital,
-	// which inflates nothing: logged, not vetoed.
+	// of F ships agree within it. Of the 50 accepted outliers, 30 understate
+	// capital against units x entry: 17 run over the budget (1909's
+	// units_used was the raw shard buy limit, 1000x its capital; big-ticket
+	// conversions sized at their buy bound with capital for one), the rest
+	// either overstate units (the 1606/1724 dose family, 4x) or price capital
+	// for one conversion while units_used is right (the 1538/1539 decants).
+	// Either way the batch the money describes isn't the batch the evaluator
+	// sizes its volume check and the dashboard its shopping list from. The
+	// other 20 overstate capital, which inflates nothing: logged, not vetoed.
 	sizeConsistencyTolerance = 0.10
 )
 
@@ -575,7 +576,7 @@ func sizeConsistencyVeto(st store.SidecarStrategy, budget int64) string {
 			st.Size.UnitsUsed, st.EntryPrice, implied, budget)
 	}
 	if st.CapitalRequired > 0 && float64(st.CapitalRequired) < implied*(1-sizeConsistencyTolerance) {
-		return fmt.Sprintf("vetoed at ship time: size fields disagree: units_used %d x entry_price %d = %.0f gp, but capital_required is %d (capital must be within %.0f%% of units x entry; units_used is the batch the capital is priced on)",
+		return fmt.Sprintf("vetoed at ship time: size fields disagree: units_used %d x entry_price %d = %.0f gp, but capital_required is %d (capital must be within %.0f%% of units x entry: price capital and units_used on the same batch)",
 			st.Size.UnitsUsed, st.EntryPrice, implied, st.CapitalRequired, sizeConsistencyTolerance*100)
 	}
 	return ""
