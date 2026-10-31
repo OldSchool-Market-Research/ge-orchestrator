@@ -39,6 +39,12 @@ type Config struct {
 	// item×archetype stays unpitchable (GE_ORCH_GRAVEYARD_COOLDOWN,
 	// default 14d; 0 disables the veto).
 	GraveyardCooldown time.Duration
+
+	// SignalRunMode is what a signal-triggered run does (GE_ORCH_SIGNAL_RUN_MODE):
+	// evaluate (judge a script-built packet) or research (a full cycle).
+	SignalRunMode string
+	// EvaluateDirective is an evaluate run's directive (absolute path).
+	EvaluateDirective string
 }
 
 type Runner struct {
@@ -55,6 +61,7 @@ type Runner struct {
 type activeRun struct {
 	runID       int64
 	params      brief.Params
+	evaluate    bool // judges a packet rather than running a full research cycle
 	precomputed bool // the brief carries the whole-market scans
 	done        chan struct{}
 }
@@ -81,6 +88,9 @@ func (r *Runner) Trigger(ctx context.Context, p brief.Params, source string) (in
 	if r.active != nil {
 		return r.active.runID, ErrBusy
 	}
+	if source == "signal" && r.Cfg.SignalRunMode == ModeEvaluate {
+		return r.startEvaluate(ctx, p, source)
+	}
 
 	// Pull pending signals into this run's brief, shared out by lane weight —
 	// the work-queue mechanism that makes consecutive runs investigate different
@@ -93,7 +103,13 @@ func (r *Runner) Trigger(ctx context.Context, p brief.Params, source string) (in
 	if err != nil {
 		return 0, err
 	}
-	runID, err := r.Store.CreateRun(ctx, brief.MarshalParams(p), briefText, source)
+	return r.launch(ctx, p, source, ModeResearch, briefText, assigned, nil)
+}
+
+// launch records a run and starts its agent. An evaluate run's lane P rows are stored
+// here because the run was given them; a research run logs its own beside the run.
+func (r *Runner) launch(ctx context.Context, p brief.Params, source, mode, briefText string, assigned []store.Signal, liveRows []store.PacketRow) (int64, error) {
+	runID, err := r.Store.CreateRunMode(ctx, brief.MarshalParams(p), briefText, source, mode)
 	if err != nil {
 		return 0, err
 	}
@@ -116,7 +132,13 @@ func (r *Runner) Trigger(ctx context.Context, p brief.Params, source string) (in
 		return 0, err
 	}
 
-	run := &activeRun{runID: runID, params: p, precomputed: brief.HasPrecomputedScans(briefText), done: make(chan struct{})}
+	evaluate := mode == ModeEvaluate
+	if evaluate && liveRows != nil {
+		if err := r.Store.InsertLanePacket(ctx, runID, "live", liveRows); err != nil {
+			log.Printf("run %d: lane P packet: %v", runID, err)
+		}
+	}
+	run := &activeRun{runID: runID, params: p, evaluate: evaluate, precomputed: brief.HasPrecomputedScans(briefText), done: make(chan struct{})}
 	r.active = run
 	go r.execute(runID, workspace, briefPath, run)
 	return runID, nil
@@ -133,16 +155,25 @@ func (r *Runner) execute(runID int64, workspace, briefPath string, run *activeRu
 	}()
 	ctx := context.Background()
 
-	go r.logProcessPacket(runID, run.params)
+	directive := r.Cfg.Directive
+	if run.evaluate {
+		directive = r.Cfg.EvaluateDirective
+	} else {
+		go r.logProcessPacket(runID, run.params)
+	}
 
 	cmd := exec.Command(r.Cfg.AgentPath)
 	cmd.Dir = workspace
 	cmd.Env = append([]string{
 		"GE_MCP_PATH=" + r.Cfg.McpPath,
 		"GE_MCP_DSN=" + r.Cfg.McpDSN,
-		"GE_AGENT_DIRECTIVE=" + r.Cfg.Directive,
+		"GE_AGENT_DIRECTIVE=" + directive,
 		"GE_AGENT_BRIEF_FILE=" + briefPath,
 	}, r.Cfg.ExtraEnv...)
+	if run.evaluate {
+		// After ExtraEnv: the last value of a duplicate key wins.
+		cmd.Env = append(cmd.Env, "GE_AGENT_EVALUATE=1", fmt.Sprintf("GE_AGENT_MAX_TURNS=%d", evaluateMaxTurns))
+	}
 	if run.precomputed {
 		cmd.Env = append(cmd.Env, "GE_AGENT_PRECOMPUTED_SCANS=1")
 	}

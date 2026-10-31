@@ -111,7 +111,7 @@ func (s *Server) packets(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"mode": "log", "summary": summary, "runs": runs})
+	writeJSON(w, 200, map[string]any{"summary": summary, "runs": runs})
 }
 
 // listProposals serves what the agent suggested, open ones first. ?status filters.

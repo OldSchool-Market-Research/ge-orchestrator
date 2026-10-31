@@ -113,6 +113,8 @@ type Run struct {
 	// Why the run started (schedule|signal|empty|manual); nil on rows that
 	// predate migration 017.
 	TriggerSource *string `json:"trigger_source"`
+	// research (a full cycle with the tools) or evaluate (judges a script-built packet).
+	Mode string `json:"mode"`
 	// Cost record from the agent's stats sidecar; nil when the sidecar was
 	// absent (old agent image, or a crash before the first turn).
 	Turns           *int   `json:"turns"`
@@ -124,10 +126,15 @@ type Run struct {
 }
 
 func (s *Store) CreateRun(ctx context.Context, brief json.RawMessage, briefText, triggerSource string) (int64, error) {
+	return s.CreateRunMode(ctx, brief, briefText, triggerSource, "research")
+}
+
+// CreateRunMode creates a run of the given mode.
+func (s *Store) CreateRunMode(ctx context.Context, brief json.RawMessage, briefText, triggerSource, mode string) (int64, error) {
 	var id int64
 	err := s.Pool.QueryRow(ctx,
-		`INSERT INTO orchestrator.runs (brief, brief_text, trigger_source) VALUES ($1, $2, $3) RETURNING run_id`,
-		brief, briefText, triggerSource).Scan(&id)
+		`INSERT INTO orchestrator.runs (brief, brief_text, trigger_source, mode) VALUES ($1, $2, $3, $4) RETURNING run_id`,
+		brief, briefText, triggerSource, mode).Scan(&id)
 	return id, err
 }
 
@@ -183,7 +190,7 @@ func (s *Store) Runs(ctx context.Context, limit int) ([]Run, error) {
 		r.brief, r.brief_text, r.report_path, r.fail_reason,
 		(SELECT count(*) FROM orchestrator.strategies st WHERE st.run_id = r.run_id),
 		r.trigger_source, r.turns, r.tool_calls, r.input_tokens, r.output_tokens,
-		r.peak_input_tokens, r.pruned_bytes
+		r.peak_input_tokens, r.pruned_bytes, r.mode
 		FROM orchestrator.runs r ORDER BY r.run_id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -195,7 +202,7 @@ func (s *Store) Runs(ctx context.Context, limit int) ([]Run, error) {
 		if err := rows.Scan(&r.RunID, &r.StartedAt, &r.FinishedAt, &r.Status,
 			&r.Brief, &r.BriefText, &r.ReportPath, &r.FailReason, &r.NStrats,
 			&r.TriggerSource, &r.Turns, &r.ToolCalls, &r.InputTokens, &r.OutputTokens,
-			&r.PeakInputTokens, &r.PrunedBytes); err != nil {
+			&r.PeakInputTokens, &r.PrunedBytes, &r.Mode); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -209,12 +216,12 @@ func (s *Store) Run(ctx context.Context, runID int64) (*Run, error) {
 		r.brief, r.brief_text, r.report_path, r.fail_reason,
 		(SELECT count(*) FROM orchestrator.strategies st WHERE st.run_id = r.run_id),
 		r.trigger_source, r.turns, r.tool_calls, r.input_tokens, r.output_tokens,
-		r.peak_input_tokens, r.pruned_bytes
+		r.peak_input_tokens, r.pruned_bytes, r.mode
 		FROM orchestrator.runs r WHERE r.run_id = $1`, runID).
 		Scan(&r.RunID, &r.StartedAt, &r.FinishedAt, &r.Status,
 			&r.Brief, &r.BriefText, &r.ReportPath, &r.FailReason, &r.NStrats,
 			&r.TriggerSource, &r.Turns, &r.ToolCalls, &r.InputTokens, &r.OutputTokens,
-			&r.PeakInputTokens, &r.PrunedBytes)
+			&r.PeakInputTokens, &r.PrunedBytes, &r.Mode)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}

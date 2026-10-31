@@ -8,9 +8,10 @@ import (
 )
 
 // Lane packets (migration 023): what a script would ship from a lane, built at a
-// run's start from the vet's own rules, set against what the run's model pitched. Log
-// mode: no run reads these rows. A pitch compares with the script once the vet has
-// passed it, since the script's list has been through the same rules.
+// run's start from the vet's own rules, set against what the run's model pitched. A
+// research run never reads its row (mode log). An evaluate run was given it (mode live).
+// A pitch compares with the script once the vet has passed it, since the script's list
+// has been through the same rules.
 
 // PacketRow is one recipe's verdict. Nil numbers are NULLs kept as NULLs: a nil GpHr
 // is a recipe that can't be priced or doesn't earn, and nil UnitsPer4h one that can't
@@ -47,6 +48,7 @@ type PacketPick struct {
 type PacketRun struct {
 	RunID        int64        `json:"run_id"`
 	RunStatus    string       `json:"run_status"`
+	Mode         string       `json:"mode"`
 	BuiltAt      time.Time    `json:"built_at"`
 	Judged       int          `json:"judged"`
 	Script       []PacketRow  `json:"script"`
@@ -71,13 +73,13 @@ type PacketSummary struct {
 }
 
 // InsertLanePacket records a run's lane P packet.
-func (s *Store) InsertLanePacket(ctx context.Context, runID int64, rows []PacketRow) error {
+func (s *Store) InsertLanePacket(ctx context.Context, runID int64, mode string, rows []PacketRow) error {
 	raw, err := json.Marshal(rows)
 	if err != nil {
 		return err
 	}
 	_, err = s.Pool.Exec(ctx, `INSERT INTO orchestrator.lane_packets (run_id, lane, mode, candidates)
-		VALUES ($1, 'P', 'log', $2)`, runID, raw)
+		VALUES ($1, 'P', $2, $3)`, runID, mode, raw)
 	return err
 }
 
@@ -85,7 +87,7 @@ func (s *Store) InsertLanePacket(ctx context.Context, runID int64, rows []Packet
 // first. runID 0 means any run.
 func (s *Store) PacketRuns(ctx context.Context, runID int64, limit int) ([]PacketRun, PacketSummary, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT p.run_id, r.status, p.built_at, p.candidates
+		SELECT p.run_id, r.status, p.mode, p.built_at, p.candidates
 		FROM orchestrator.lane_packets p
 		JOIN orchestrator.runs r USING (run_id)
 		WHERE p.lane = 'P' AND ($1::bigint = 0 OR p.run_id = $1)
@@ -103,7 +105,7 @@ func (s *Store) PacketRuns(ctx context.Context, runID int64, limit int) ([]Packe
 	for rows.Next() {
 		var p packet
 		var raw []byte
-		if err := rows.Scan(&p.run.RunID, &p.run.RunStatus, &p.run.BuiltAt, &raw); err != nil {
+		if err := rows.Scan(&p.run.RunID, &p.run.RunStatus, &p.run.Mode, &p.run.BuiltAt, &raw); err != nil {
 			return nil, PacketSummary{}, err
 		}
 		if err := json.Unmarshal(raw, &p.rows); err != nil {

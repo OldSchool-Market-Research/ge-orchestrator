@@ -98,6 +98,12 @@ func (ev *Evaluator) legConversions(snap *Snap, qty int64) int64 {
 	return int64(ev.participation() * float64(snap.Vol4h) / float64(qty))
 }
 
+// LegConversions is how many conversions a leg's 4h volume allows at the default
+// participation: the packet's vol_constrained, the same cap a projection applies.
+func LegConversions(snap *Snap, qty int64) int64 {
+	return (&Evaluator{}).legConversions(snap, qty)
+}
+
 // legFresh judges a quote's age against the leg's own trade cadence, like
 // combo_quote and the directive: wall-clock age is not staleness. trades24h counts
 // the 5m buckets where that side printed in the last 24h, so a leg printing in every

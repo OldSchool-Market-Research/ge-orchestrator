@@ -71,6 +71,11 @@ func main() {
 		}
 	}
 	graveyardCooldown := durEnv("GE_ORCH_GRAVEYARD_COOLDOWN", 14*24*time.Hour)
+	signalRunMode := getenv("GE_ORCH_SIGNAL_RUN_MODE", runner.ModeEvaluate)
+	if signalRunMode != runner.ModeEvaluate && signalRunMode != runner.ModeResearch {
+		log.Fatalf("GE_ORCH_SIGNAL_RUN_MODE must be %s or %s", runner.ModeEvaluate, runner.ModeResearch)
+	}
+	log.Printf("signal runs: %s", signalRunMode)
 	log.Printf("vet: calibrated floor enforced for %s, graveyard cooldown %s", calVetoLanes, graveyardCooldown)
 
 	r := &runner.Runner{
@@ -84,6 +89,9 @@ func main() {
 
 			CalVetoEnforce:    calVetoEnforce,
 			GraveyardCooldown: graveyardCooldown,
+
+			SignalRunMode:     signalRunMode,
+			EvaluateDirective: getenv("GE_ORCH_EVALUATE_DIRECTIVE", "/etc/ge-agent/EVALUATE.md"),
 		},
 		Store:  st,
 		Hub:    runner.NewHub(),
@@ -194,8 +202,8 @@ func maybeTriggerOnEmpty(ctx context.Context, st *store.Store, r *runner.Runner,
 	log.Printf("trigger-on-empty: portfolio empty, started run %d", runID)
 }
 
-// maybeTriggerOnSignals starts a research run when the collector queued new
-// signals — the reaction-speed path. Same DB-anchored cooldown discipline as
+// maybeTriggerOnSignals starts a run when the collector queued new signals — the
+// reaction-speed path. Same DB-anchored cooldown discipline as
 // trigger-on-empty so restarts and manual runs count toward it.
 func maybeTriggerOnSignals(ctx context.Context, st *store.Store, r *runner.Runner, cooldown time.Duration) {
 	if r.ActiveRunID() != 0 {
@@ -211,6 +219,10 @@ func maybeTriggerOnSignals(ctx context.Context, st *store.Store, r *runner.Runne
 	}
 	runID, err := r.Trigger(ctx, brief.Defaults(), "signal")
 	if err == runner.ErrBusy {
+		return
+	}
+	if err == runner.ErrNothingToEvaluate {
+		log.Print("trigger-on-signals: nothing to evaluate, no run started")
 		return
 	}
 	if err != nil {
@@ -233,6 +245,7 @@ func agentEnvPassthrough() []string {
 		"GE_AGENT_BRIEF_FILE":        true,
 		"GE_AGENT_REPORTS_DIR":       true,
 		"GE_AGENT_PRECOMPUTED_SCANS": true,
+		"GE_AGENT_EVALUATE":          true,
 	}
 	var extra []string
 	for _, kv := range os.Environ() {

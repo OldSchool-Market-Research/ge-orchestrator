@@ -70,3 +70,13 @@ func (s *Store) BuyLimits(ctx context.Context, ids []int) (map[int]int64, error)
 	}
 	return out, rows.Err()
 }
+
+// RelationNotes is a relation's curated notes: skill gates, fees, caveats.
+func (s *Store) RelationNotes(ctx context.Context, id int) (*string, error) {
+	var notes *string
+	err := s.Pool.QueryRow(ctx, `SELECT notes FROM item_relations WHERE relation_id = $1`, id).Scan(&notes)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return notes, err
+}
