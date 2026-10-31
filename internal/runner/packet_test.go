@@ -40,9 +40,10 @@ func TestJudgeRecipeShips(t *testing.T) {
 	}
 }
 
-// A budget-bound recipe whose fee pushes units x entry over the vet's size rule: the
-// bound on units leaves the fee out, and the entry_price a strategy copies includes it.
-func TestJudgeRecipeAppliesTheVetsSizeRule(t *testing.T) {
+// A budget-bound recipe whose fee pushes units x entry over the budget: the bound on
+// units leaves the fee out, and the entry_price a strategy copies includes it. The vet
+// would let 10% through, but the agent's validator rejects the report at a gp over.
+func TestJudgeRecipeHoldsCapitalToTheBudget(t *testing.T) {
 	f := func(v float64) *float64 { return &v }
 	s := goodRecipe()
 	// 100k input at 50M budget: 500 actions per 4h, 125/hr, 1.4M margin an action.
@@ -53,7 +54,7 @@ func TestJudgeRecipeAppliesTheVetsSizeRule(t *testing.T) {
 		ship bool
 	}{
 		{"no fee", 0, true},
-		{"fee inside the tolerance", 10_000, true},
+		{"fee inside the vet's tolerance", 10_000, false},
 		{"fee over it", 10_001, false},
 	} {
 		row := store.PacketRow{Hours24h: 24, HoursAtFloor24h: 24}

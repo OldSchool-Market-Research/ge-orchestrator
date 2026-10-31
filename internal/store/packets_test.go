@@ -121,7 +121,7 @@ func TestLanePacketRoundTrip(t *testing.T) {
 	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.strategies WHERE run_id=$1`, runID)
 
 	gp, units := int64(400_000), int64(5760)
-	if err := s.InsertLanePacket(ctx, runID, []PacketRow{
+	if err := s.InsertLanePacket(ctx, runID, "log", []PacketRow{
 		{RecipeID: 26, Name: "Mahogany Plank", OutputItem: intPtr(8782), GpHr: &gp, UnitsPer4h: &units, Hours24h: 24, HoursAtFloor24h: 24, Ship: true},
 		{RecipeID: 31, Name: "Thin one", Why: "under the floor"},
 	}); err != nil {
@@ -151,6 +151,9 @@ func TestLanePacketRoundTrip(t *testing.T) {
 		t.Fatalf("got %d runs", len(runs))
 	}
 	r := runs[0]
+	if r.Mode != "log" {
+		t.Errorf("mode %q", r.Mode)
+	}
 	if r.RunID != runID || r.Judged != 2 || len(r.Script) != 1 || r.Script[0].GpHr == nil || *r.Script[0].GpHr != gp {
 		t.Errorf("run %+v", r)
 	}
@@ -158,7 +161,7 @@ func TestLanePacketRoundTrip(t *testing.T) {
 		t.Errorf("script only %v, model only %+v", r.ScriptOnly, r.ModelOnly)
 	}
 	// One packet a run: the primary key holds it.
-	if err := s.InsertLanePacket(ctx, runID, nil); err == nil {
+	if err := s.InsertLanePacket(ctx, runID, "log", nil); err == nil {
 		t.Error("second packet for a run was accepted")
 	}
 }

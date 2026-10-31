@@ -257,6 +257,148 @@ func TestUpsertSignalEscapeSkipsNullScores(t *testing.T) {
 	}
 }
 
+// The script's refusals cool the collector's re-queue but falsify nothing: no repeat
+// count, no prior verdict in a brief, and a candidate that clears the rules comes back.
+// Needs STORE_TEST_DSN.
+func TestScriptDismissalsAreNotVerdicts(t *testing.T) {
+	dsn := os.Getenv("STORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("STORE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	const item, cooldown = 987661, 48 * time.Hour
+	cleanup := func() { s.Pool.Exec(ctx, `DELETE FROM orchestrator.signals WHERE item_id=$1`, item) }
+	cleanup()
+	defer cleanup()
+	seed := func(ago string) {
+		t.Helper()
+		if _, err := s.Pool.Exec(ctx, `INSERT INTO orchestrator.signals
+			(kind, item_id, item_name, metrics, status, reason, resolved_at)
+			VALUES ('combo', $1, 'x', '{"budget_cycle_gp":300000}'::jsonb, 'dismissed', 'script: lookup', now() - $2::interval)`, item, ago); err != nil {
+			t.Fatal(err)
+		}
+	}
+	metrics := map[string]any{"budget_cycle_gp": 300000}
+
+	seed("1 hour")
+	if isNew, err := s.UpsertSignal(ctx, "combo", item, "x", metrics, cooldown); err != nil || isNew {
+		t.Errorf("inside the cooldown the collector stays out: new=%v err=%v", isNew, err)
+	}
+	if at, reason, err := s.LatestDismissal(ctx, "combo", item); err != nil || at != nil || reason != nil {
+		t.Errorf("a script refusal reads as a prior verdict: %v %v %v", at, reason, err)
+	}
+	id, isNew, err := s.UpsertCandidateSignal(ctx, "combo", item, "x", metrics, cooldown)
+	if err != nil || !isNew || id == 0 {
+		t.Fatalf("a candidate passing now comes back: id=%d new=%v err=%v", id, isNew, err)
+	}
+	if _, isNew, err := s.UpsertCandidateSignal(ctx, "combo", item, "x", metrics, cooldown); err != nil || isNew {
+		t.Errorf("a live signal only refreshes: new=%v err=%v", isNew, err)
+	}
+	cleanup()
+
+	// Past the cooldown, two refusals don't trip the repeat guard.
+	seed("4 days")
+	seed("3 days")
+	if isNew, err := s.UpsertSignal(ctx, "combo", item, "x", metrics, cooldown); err != nil || !isNew {
+		t.Errorf("script refusals tripped the repeat guard: new=%v err=%v", isNew, err)
+	}
+	cleanup()
+
+	// A run's verdict holds a candidate out, the same as it holds out the collector.
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO orchestrator.signals
+		(kind, item_id, item_name, metrics, status, reason, resolved_at)
+		VALUES ('combo', $1, 'x', '{"budget_cycle_gp":300000}'::jsonb, 'dismissed', 'margin_collapse', now() - interval '1 hour')`, item); err != nil {
+		t.Fatal(err)
+	}
+	if _, isNew, err := s.UpsertCandidateSignal(ctx, "combo", item, "x", metrics, cooldown); err != nil || isNew {
+		t.Errorf("a verdict didn't hold the candidate out: new=%v err=%v", isNew, err)
+	}
+}
+
+// An evaluate run's silence is a verdict that holds the candidate out. A signal it
+// shipped without answering stays out of that. Needs STORE_TEST_DSN.
+func TestDismissUnanswered(t *testing.T) {
+	dsn := os.Getenv("STORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("STORE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	const passed, shipped, cooldown = 987662, 987663, 48 * time.Hour
+	cleanup := func() {
+		s.Pool.Exec(ctx, `DELETE FROM orchestrator.signals WHERE item_id = ANY($1)`, []int{passed, shipped})
+	}
+	cleanup()
+	defer cleanup()
+	metrics := map[string]any{"budget_cycle_gp": 300000}
+	passedID, _, err := s.UpsertCandidateSignal(ctx, "combo", passed, "x", metrics, cooldown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shippedID, _, err := s.UpsertCandidateSignal(ctx, "combo", shipped, "y", metrics, cooldown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.OrphanRunningRuns(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := s.CreateRun(ctx, json.RawMessage(`{}`), "test brief", "signal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.OrphanRunningRuns(ctx)
+	if err := s.AssignSignals(ctx, runID, []int64{passedID, shippedID}); err != nil {
+		t.Fatal(err)
+	}
+	var st SidecarStrategy
+	if err := json.Unmarshal([]byte(`{"id":"C-y","archetype":"C","title":"t","thesis":"t",
+		"items":[{"name":"y","id":987663}],"entry":"e","exit":"x","entry_price":1,"exit_price":2,
+		"horizon":"h","capital_required":1,"size":{"buy_limit":1,"vol_constrained":1,"units_used":1},
+		"expected_value":{"per_cycle_gp":1,"per_1h_gp":1,"per_day_gp":1,"roi_pct":1},
+		"confidence":"medium","invalidation":"i"}`), &st); err != nil {
+		t.Fatal(err)
+	}
+	list := []SidecarStrategy{st}
+	if err := s.AttachProvenance(ctx, runID, time.Now().UTC(), list, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertStrategies(ctx, runID, time.Now().UTC(), list, nil); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Exec(ctx, `DELETE FROM orchestrator.strategies WHERE run_id=$1`, runID)
+	if err := s.LinkSignalStrategies(ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DismissUnanswered(ctx, runID, "no verdict: run saw it"); err != nil {
+		t.Fatal(err)
+	}
+	var status, reason string
+	if err := s.Pool.QueryRow(ctx, `SELECT status, reason FROM orchestrator.signals WHERE signal_id=$1`, passedID).Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != "dismissed" || reason != "no verdict: run saw it" {
+		t.Errorf("unanswered signal %s: %q", status, reason)
+	}
+	if err := s.Pool.QueryRow(ctx, `SELECT status FROM orchestrator.signals WHERE signal_id=$1`, shippedID).Scan(&status); err != nil || status != "assigned" {
+		t.Errorf("shipped signal %q: %v", status, err)
+	}
+	if err := s.ReleaseRunSignals(ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, isNew, err := s.UpsertCandidateSignal(ctx, "combo", passed, "x", metrics, cooldown); err != nil || isNew {
+		t.Errorf("silence didn't hold the candidate out: new=%v err=%v", isNew, err)
+	}
+}
+
 // A run orphaned by a restart gives its assigned signals back, or their items
 // could never queue again. Needs STORE_TEST_DSN.
 func TestOrphanRunningRunsReleasesSignals(t *testing.T) {

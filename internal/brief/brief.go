@@ -199,24 +199,8 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 		}
 	}
 
-	closedList, err := s.RecentlyClosed(ctx, 12)
-	if err != nil {
+	if err := writeRecentlyClosed(ctx, &b, s); err != nil {
 		return "", err
-	}
-	if len(closedList) > 0 {
-		b.WriteString("\n### Recently killed/expired (do not re-pitch without materially new evidence)\n")
-		b.WriteString("How long each survived is the lesson: a kill inside a couple of hours means the pitched margin was a spike, not a standing spread.\n")
-		for _, st := range closedList {
-			reason := ""
-			if st.StateReason != nil {
-				reason = *st.StateReason
-			}
-			line := fmt.Sprintf("- %s [%s, item_id %d] %s", st.Sid, st.Archetype, st.PrimaryItemID, st.State)
-			if st.ClosedAt != nil {
-				line += fmt.Sprintf(" after %.1fh", st.ClosedAt.Sub(st.OpenedAt).Hours())
-			}
-			fmt.Fprintf(&b, "%s: %s\n", line, reason)
-		}
 	}
 
 	if grave, err := s.Graveyard(ctx); err == nil {
@@ -227,6 +211,65 @@ func Render(ctx context.Context, s *store.Store, p Params, at time.Time, assigne
 		b.WriteString("\n### Operator notes\n" + strings.TrimSpace(p.Notes) + "\n")
 	}
 	return b.String(), nil
+}
+
+// RenderEvaluate produces an evaluate run's brief: the packet the run judges, the
+// signals it answers and the record it judges against. The rest of a research brief
+// is what a search needs, and the packet has already been through it.
+func RenderEvaluate(ctx context.Context, s *store.Store, p Params, at time.Time, assigned []store.Signal, candidates []string) (string, error) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "_Generated %s UTC._\n\n", at.Format("2006-01-02 15:04"))
+	b.WriteString("### Constraints\n")
+	fmt.Fprintf(&b, "- Research budget: %s gp per opportunity.\n", group(p.CapitalGp))
+	fmt.Fprintf(&b, "- Risk appetite: %s.\n", p.Risk)
+	fmt.Fprintf(&b, "- Minimum confidence to ship a strategy: %s.\n", p.MinConfidence)
+	if len(assigned) > 0 {
+		b.WriteString("\n### Assigned candidates\n")
+		b.WriteString("Every signal below needs a verdict in submit_report's `signal_verdicts`. Each one's item leads a candidate in the packet.\n")
+		for _, sig := range assigned {
+			fmt.Fprintf(&b, "- signal_id %d [%s] %s (item_id %d)\n", sig.SignalID, sig.Kind, sig.ItemName, sig.ItemID)
+			if at, reason, err := s.LatestDismissal(ctx, sig.Kind, sig.ItemID); err == nil {
+				if line := dismissalLine(at, reason); line != "" {
+					b.WriteString(line)
+				}
+			}
+		}
+	}
+	fmt.Fprintf(&b, "\n### Packet (candidates: %d)\n", len(candidates))
+	for _, line := range candidates {
+		b.WriteString(line + "\n")
+	}
+	if err := writeRecentlyClosed(ctx, &b, s); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(p.Notes) != "" {
+		b.WriteString("\n### Operator notes\n" + strings.TrimSpace(p.Notes) + "\n")
+	}
+	return b.String(), nil
+}
+
+func writeRecentlyClosed(ctx context.Context, b *strings.Builder, s *store.Store) error {
+	closedList, err := s.RecentlyClosed(ctx, 12)
+	if err != nil {
+		return err
+	}
+	if len(closedList) == 0 {
+		return nil
+	}
+	b.WriteString("\n### Recently killed/expired (do not re-pitch without materially new evidence)\n")
+	b.WriteString("How long each survived is the lesson: a kill inside a couple of hours means the pitched margin was a spike, not a standing spread.\n")
+	for _, st := range closedList {
+		reason := ""
+		if st.StateReason != nil {
+			reason = *st.StateReason
+		}
+		line := fmt.Sprintf("- %s [%s, item_id %d] %s", st.Sid, st.Archetype, st.PrimaryItemID, st.State)
+		if st.ClosedAt != nil {
+			line += fmt.Sprintf(" after %.1fh", st.ClosedAt.Sub(st.OpenedAt).Hours())
+		}
+		fmt.Fprintf(b, "%s: %s\n", line, reason)
+	}
+	return nil
 }
 
 // Ship floors, duplicated from runner/vet.go (runner imports brief, so the

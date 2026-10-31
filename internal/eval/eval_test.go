@@ -547,7 +547,7 @@ func TestLegFreshUsesTheLegsOwnCadence(t *testing.T) {
 		{"never traded", nil, 40, false},
 	}
 	for _, c := range cases {
-		if got := legFresh(c.age, c.trades); got != c.want {
+		if got := LegFresh(c.age, c.trades); got != c.want {
 			t.Errorf("%s: fresh=%v", c.name, got)
 		}
 	}

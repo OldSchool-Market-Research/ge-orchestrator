@@ -14,9 +14,9 @@ import (
 	"github.com/osrs-ge/ge-orchestrator/internal/store"
 )
 
-// Lane P's candidate packet (log mode): what a script would ship at a run's start,
-// judged by the vet's own rules so it can't drift from them. The run never sees it.
-// Each read is the vet's own per-recipe query, which is cheap at this scale: 254
+// Lane P's candidate packet: what a script would ship at a run's start, judged by the
+// vet's own rules so it can't drift from them. An evaluate run judges it; a research
+// run never sees it, and the row only measures what the run picked. Each read is the vet's own per-recipe query, which is cheap at this scale: 254
 // recipes took about a second on prod, once per run.
 
 // packetTimeout bounds a build, so a slow database can't leave one hanging.
@@ -38,7 +38,7 @@ func (r *Runner) logProcessPacket(runID int64, p brief.Params) {
 		log.Printf("run %d: lane P packet: %v", runID, err)
 		return
 	}
-	if err := r.Store.InsertLanePacket(ctx, runID, rows); err != nil {
+	if err := r.Store.InsertLanePacket(ctx, runID, "log", rows); err != nil {
 		log.Printf("run %d: lane P packet: %v", runID, err)
 		return
 	}
@@ -62,7 +62,7 @@ func (r *Runner) logPacketComparison(ctx context.Context, runID int64) {
 		return
 	}
 	c := runs[0]
-	log.Printf("run %d: lane P packet (log only): script %d, model %d, both %d",
+	log.Printf("run %d: lane P packet: script %d, model %d, both %d",
 		runID, len(c.Script), len(c.Both)+len(c.ModelOnly), len(c.Both))
 }
 
@@ -84,7 +84,7 @@ func (r *Runner) buildProcessPacket(ctx context.Context, p brief.Params) ([]stor
 			return nil, ctx.Err()
 		}
 		if err != nil {
-			row.Why = "lookup failed: " + err.Error()
+			row.Why = lookupFailed + err.Error()
 		} else {
 			judgeRecipe(&row, snap, q.FeeGp, p.CapitalGp)
 		}
@@ -107,7 +107,13 @@ func judgeRecipe(row *store.PacketRow, snap *eval.ProcessSnap, feeGp float64, bu
 	if units := eval.ProcessUnitsPer4h(snap, budgetGp); units > 0 { // 0 would project at the market rate, not at no size
 		row.UnitsPer4h = &units
 		row.GpHr = eval.ProjectProcessPer1h(snap, units)
-		why = sizeConsistencyVeto(copiedSize(units, *snap.GrossIn, feeGp), budgetGp)
+		size := copiedSize(units, *snap.GrossIn, feeGp)
+		why = sizeConsistencyVeto(size, budgetGp)
+		// The vet's tolerance stops short of the agent's validator: it holds capital to
+		// the budget exactly, and one strategy over it rejects the whole report.
+		if why == "" && size.CapitalRequired > budgetGp {
+			why = fmt.Sprintf("capital_required %d is over the %d research budget", size.CapitalRequired, budgetGp)
+		}
 	}
 	if why == "" {
 		why = processVeto(snap, row.GpHr)

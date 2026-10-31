@@ -38,11 +38,15 @@ const (
 	repeatDismissMin        = 2
 	repeatEscapeRatio       = 2.0
 
-	// agentDismissed selects the verdicts a run actually reached. The harness's
-	// own closes are not falsifications: a signal that aged out unassigned
-	// proved nothing about its item, and neither did one withdrawn in a queue
-	// cleanup (migration 018).
-	agentDismissed = `status='dismissed' AND coalesce(reason,'') <> 'expired unassigned' AND coalesce(reason,'') NOT LIKE 'withdrawn:%'`
+	// settledDismissed is anything that should keep the collector from re-queueing an
+	// item for the cooldown: a run's verdict, or the script's refusal, which would only
+	// repeat hourly. A signal that aged out unassigned proved nothing about its item, and
+	// neither did one withdrawn in a queue cleanup (migration 018).
+	settledDismissed = `status='dismissed' AND coalesce(reason,'') <> 'expired unassigned' AND coalesce(reason,'') NOT LIKE 'withdrawn:%'`
+
+	// agentDismissed selects the verdicts a run actually reached. A script's refusal
+	// (evaluate mode's "script: ...") applied a rule at one moment, so it falsified nothing.
+	agentDismissed = settledDismissed + ` AND coalesce(reason,'') NOT LIKE 'script:%'`
 
 	// signalScore is a detection's size in its lens's own units, for the repeat
 	// guard's escape. NULL (no such metric) never escapes.
@@ -52,12 +56,20 @@ const (
 		ELSE (%[1]s->>'gp_cycle')::float8 END`
 )
 
-var upsertSignalSQL = fmt.Sprintf(`INSERT INTO orchestrator.signals (kind, item_id, item_name, metrics)
+var (
+	upsertSignalSQL    = upsertSQL(settledDismissed)
+	upsertCandidateSQL = upsertSQL(agentDismissed)
+)
+
+// upsertSQL queues a detection unless the cooldown's dismissals or the repeat guard hold
+// it out.
+func upsertSQL(cooldown string) string {
+	return fmt.Sprintf(`INSERT INTO orchestrator.signals (kind, item_id, item_name, metrics)
 	SELECT $1::text,$2::int,$3::text,$4::jsonb
 	WHERE $5::interval = '0'::interval OR (
 		NOT EXISTS (
 			SELECT 1 FROM orchestrator.signals
-			WHERE kind=$1 AND item_id=$2 AND %[1]s
+			WHERE kind=$1 AND item_id=$2 AND %[4]s
 			  AND resolved_at > now() - $5::interval)
 		AND NOT (
 			(SELECT count(*) FROM orchestrator.signals
@@ -69,8 +81,9 @@ var upsertSignalSQL = fmt.Sprintf(`INSERT INTO orchestrator.signals (kind, item_
 				ORDER BY resolved_at DESC LIMIT 1), false) = false))
 	ON CONFLICT (kind, item_id) WHERE status IN ('pending','assigned')
 	DO UPDATE SET metrics = EXCLUDED.metrics
-	RETURNING (xmax = 0)`,
-	agentDismissed, fmt.Sprintf(signalScore, "$4::jsonb"), fmt.Sprintf(signalScore, "metrics"))
+	RETURNING signal_id, (xmax = 0)`,
+		agentDismissed, fmt.Sprintf(signalScore, "$4::jsonb"), fmt.Sprintf(signalScore, "metrics"), cooldown)
+}
 
 // UpsertSignal queues a detection. A live (pending/assigned) signal for the
 // same (kind, item) just gets its metrics refreshed — detections don't stack.
@@ -85,17 +98,31 @@ var upsertSignalSQL = fmt.Sprintf(`INSERT INTO orchestrator.signals (kind, item_
 // such as an escaped signal whose score has since fallen back; that refresh is
 // cosmetic, so the simpler SQL wins.
 func (s *Store) UpsertSignal(ctx context.Context, kind string, itemID int, itemName string, metrics any, dismissCooldown time.Duration) (bool, error) {
+	_, inserted, err := s.upsert(ctx, upsertSignalSQL, kind, itemID, itemName, metrics, dismissCooldown)
+	return inserted, err
+}
+
+// UpsertCandidateSignal queues a signal for something a packet would show the model. The
+// script's own refusals don't hold it out: it clears the rules now, and they only said it
+// didn't then. Returns the new signal's id and true; false means a run's verdict holds it
+// out, or a signal for it is already live.
+func (s *Store) UpsertCandidateSignal(ctx context.Context, kind string, itemID int, itemName string, metrics any, dismissCooldown time.Duration) (int64, bool, error) {
+	return s.upsert(ctx, upsertCandidateSQL, kind, itemID, itemName, metrics, dismissCooldown)
+}
+
+func (s *Store) upsert(ctx context.Context, sql, kind string, itemID int, itemName string, metrics any, dismissCooldown time.Duration) (int64, bool, error) {
 	m, err := json.Marshal(metrics)
 	if err != nil {
-		return false, err
+		return 0, false, err
 	}
+	var id int64
 	var inserted bool
-	err = s.Pool.QueryRow(ctx, upsertSignalSQL, kind, itemID, itemName, m, dismissCooldown.String(),
-		repeatDismissWindowDays, repeatDismissMin, repeatEscapeRatio).Scan(&inserted)
+	err = s.Pool.QueryRow(ctx, sql, kind, itemID, itemName, m, dismissCooldown.String(),
+		repeatDismissWindowDays, repeatDismissMin, repeatEscapeRatio).Scan(&id, &inserted)
 	if err == pgx.ErrNoRows {
-		return false, nil // suppressed: recently or repeatedly dismissed, not re-queued
+		return 0, false, nil // suppressed: recently or repeatedly dismissed, not re-queued
 	}
-	return inserted, err
+	return id, inserted, err
 }
 
 // LatestDismissal returns when a run last dismissed a (kind, item) and the
@@ -239,6 +266,15 @@ func (s *Store) ResolveSignal(ctx context.Context, signalID int64, verdict, reas
 		return s.RecordWatchDismissal(ctx, itemID)
 	}
 	return nil
+}
+
+// DismissUnanswered closes a run's unanswered signals as its verdict. One linked to a
+// strategy shipped, so it's left for ReleaseRunSignals: the open strategy answers it.
+func (s *Store) DismissUnanswered(ctx context.Context, runID int64, reason string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE orchestrator.signals
+		SET status='dismissed', reason=$2, resolved_at=now()
+		WHERE run_id=$1 AND status='assigned' AND strategy_id IS NULL`, runID, reason)
+	return err
 }
 
 // ReleaseRunSignals returns a run's unanswered signals to the queue so the next

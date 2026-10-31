@@ -239,12 +239,22 @@ where they came from. P1 starts recording that, in log mode.
   than simulated fills, so the weights are a record to judge first.
 - **Regime** (`store.RecordRegime`, `regime_snapshots`, `GET /api/regime`): one row
   per sweep, logged now because conditioning on it later needs weeks of history.
-- **Lane P packet** (`runner.logProcessPacket`, `lane_packets`, `GET /api/packets`):
+- **Lane P packet** (`runner.buildProcessPacket`, `lane_packets`, `GET /api/packets`):
   at each run's start, every recipe's verdict from the vet's own rules, at the size a
   strategy would copy. The API sets the shippable ones against what the model pitched
-  and the vet passed. Log mode: no run reads it. It's the first step of splitting runs
-  into a frequent evaluate mode (a script gathers and filters, the model judges) and a
-  rare research mode. Runs only switch once this comparison holds up.
+  and the vet passed. A research run never reads its row (mode `log`); an evaluate run
+  was given it (mode `live`).
+- **Evaluate runs** (`runner.startEvaluate`, `runs.mode`, `GE_ORCH_SIGNAL_RUN_MODE`):
+  a signal-triggered run no longer searches. A script finds lanes C and P's candidates,
+  prices and sizes them, and passes each through `vetOne`. The model gets the result in
+  its brief, `submit_report` as its only tool, and `EVALUATE.md` as its directive. Every
+  candidate carries a signal, so it owes a verdict, and a dismissal keeps it out under the
+  usual cooldown and repeat guard, as does silence unless the item shipped: the model reads
+  what's new, and no run starts when nothing is. The collector looks every cycle, since a
+  candidate can clear the rules with no new signal. Signals the rules refuse are dismissed with a `script:` reason, which cools
+  the collector's re-queue but counts as nobody's verdict; a failed lookup leaves them
+  queued. The 6h schedule, manual and empty-book runs stay full research, and V's signals
+  wait for them. `GE_ORCH_SIGNAL_RUN_MODE=research` turns the whole thing off.
 
 ## C's measurement epoch 2 (2026-10-30)
 

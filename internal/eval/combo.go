@@ -98,13 +98,19 @@ func (ev *Evaluator) legConversions(snap *Snap, qty int64) int64 {
 	return int64(ev.participation() * float64(snap.Vol4h) / float64(qty))
 }
 
-// legFresh judges a quote's age against the leg's own trade cadence, like
+// LegConversions is how many conversions a leg's 4h volume allows at the default
+// participation: the packet's vol_constrained, the same cap a projection applies.
+func LegConversions(snap *Snap, qty int64) int64 {
+	return (&Evaluator{}).legConversions(snap, qty)
+}
+
+// LegFresh judges a quote's age against the leg's own trade cadence, like
 // combo_quote and the directive: wall-clock age is not staleness. trades24h counts
 // the 5m buckets where that side printed in the last 24h, so a leg printing in every
 // bucket keeps a 15-minute bar. The old fixed 15 minutes marked 83% of combine ticks
 // (54% of sets) stale, and with 80% healthy ticks needed to confirm, only 3 of 176
 // C closes ever did.
-func legFresh(ageS *int, trades24h int64) bool {
+func LegFresh(ageS *int, trades24h int64) bool {
 	if ageS == nil || trades24h <= 0 {
 		return false
 	}
@@ -166,7 +172,7 @@ func (ev *Evaluator) computeCombo(ctx context.Context, st store.Strategy) (store
 			allPriced = false
 			continue
 		}
-		if !legFresh(ageS, trades24h) {
+		if !LegFresh(ageS, trades24h) {
 			allFresh = false
 		}
 		if l.Side == "buy" {

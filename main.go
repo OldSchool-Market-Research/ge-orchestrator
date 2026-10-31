@@ -71,6 +71,11 @@ func main() {
 		}
 	}
 	graveyardCooldown := durEnv("GE_ORCH_GRAVEYARD_COOLDOWN", 14*24*time.Hour)
+	signalRunMode := getenv("GE_ORCH_SIGNAL_RUN_MODE", runner.ModeEvaluate)
+	if signalRunMode != runner.ModeEvaluate && signalRunMode != runner.ModeResearch {
+		log.Fatalf("GE_ORCH_SIGNAL_RUN_MODE must be %s or %s", runner.ModeEvaluate, runner.ModeResearch)
+	}
+	log.Printf("signal runs: %s", signalRunMode)
 	log.Printf("vet: calibrated floor enforced for %s, graveyard cooldown %s", calVetoLanes, graveyardCooldown)
 
 	r := &runner.Runner{
@@ -84,6 +89,10 @@ func main() {
 
 			CalVetoEnforce:    calVetoEnforce,
 			GraveyardCooldown: graveyardCooldown,
+
+			SignalRunMode:         signalRunMode,
+			EvaluateDirective:     getenv("GE_ORCH_EVALUATE_DIRECTIVE", "/etc/ge-agent/EVALUATE.md"),
+			SignalDismissCooldown: max(durEnv("GE_ORCH_SIGNAL_DISMISS_COOLDOWN", 48*time.Hour), 0),
 		},
 		Store:  st,
 		Hub:    runner.NewHub(),
@@ -108,8 +117,9 @@ func main() {
 	log.Printf("evaluator: every %s (trigger-on-empty cooldown: %s)", evalEvery, emptyCooldown)
 
 	// Trend collector: deterministic full-market sweeps on their own ticker.
-	// New signals can trigger a research run (with its own cooldown) so the
-	// system reacts to fresh anomalies without waiting for the schedule.
+	// Each cycle can trigger a run (with its own cooldown) so the system reacts to
+	// fresh anomalies without waiting for the schedule: an evaluate run when anything
+	// new clears the rules, or in research mode a research run on new signals.
 	collectEvery := durEnv("GE_ORCH_COLLECT_INTERVAL", time.Hour)
 	signalCooldown := durEnv("GE_ORCH_SIGNAL_COOLDOWN", 30*time.Minute)
 	if collectEvery > 0 {
@@ -125,6 +135,11 @@ func main() {
 				n := col.Cycle(ctx)
 				if n > 0 {
 					log.Printf("collector: %d new signal(s)", n)
+				}
+				// A packet finds its own candidates, so it needs no new signal to look. The
+				// look is a packet build, under the runner's lock, and starts no run if
+				// nothing is new.
+				if n > 0 || signalRunMode == runner.ModeEvaluate {
 					maybeTriggerOnSignals(ctx, st, r, signalCooldown)
 				}
 				time.Sleep(collectEvery)
@@ -194,8 +209,8 @@ func maybeTriggerOnEmpty(ctx context.Context, st *store.Store, r *runner.Runner,
 	log.Printf("trigger-on-empty: portfolio empty, started run %d", runID)
 }
 
-// maybeTriggerOnSignals starts a research run when the collector queued new
-// signals — the reaction-speed path. Same DB-anchored cooldown discipline as
+// maybeTriggerOnSignals starts a signal run, the reaction-speed path. Same
+// DB-anchored cooldown discipline as
 // trigger-on-empty so restarts and manual runs count toward it.
 func maybeTriggerOnSignals(ctx context.Context, st *store.Store, r *runner.Runner, cooldown time.Duration) {
 	if r.ActiveRunID() != 0 {
@@ -213,11 +228,15 @@ func maybeTriggerOnSignals(ctx context.Context, st *store.Store, r *runner.Runne
 	if err == runner.ErrBusy {
 		return
 	}
+	if err == runner.ErrNothingToEvaluate {
+		log.Print("trigger-on-signals: nothing to evaluate, no run started")
+		return
+	}
 	if err != nil {
 		log.Printf("trigger-on-signals: %v", err)
 		return
 	}
-	log.Printf("trigger-on-signals: new signals queued, started run %d", runID)
+	log.Printf("trigger-on-signals: started run %d", runID)
 }
 
 // agentEnvPassthrough forwards every GE_AGENT_* var from the pod
@@ -233,6 +252,7 @@ func agentEnvPassthrough() []string {
 		"GE_AGENT_BRIEF_FILE":        true,
 		"GE_AGENT_REPORTS_DIR":       true,
 		"GE_AGENT_PRECOMPUTED_SCANS": true,
+		"GE_AGENT_EVALUATE":          true,
 	}
 	var extra []string
 	for _, kv := range os.Environ() {
