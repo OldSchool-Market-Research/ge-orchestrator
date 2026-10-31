@@ -268,6 +268,15 @@ func (s *Store) ResolveSignal(ctx context.Context, signalID int64, verdict, reas
 	return nil
 }
 
+// DismissUnanswered closes a run's unanswered signals as its verdict. One linked to a
+// strategy shipped, so it's left for ReleaseRunSignals: the open strategy answers it.
+func (s *Store) DismissUnanswered(ctx context.Context, runID int64, reason string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE orchestrator.signals
+		SET status='dismissed', reason=$2, resolved_at=now()
+		WHERE run_id=$1 AND status='assigned' AND strategy_id IS NULL`, runID, reason)
+	return err
+}
+
 // ReleaseRunSignals returns a run's unanswered signals to the queue so the next
 // run picks them up. A signal going back is open again, so it drops any link to a
 // strategy inferred for it; the strategy keeps its source_signal_id.

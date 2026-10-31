@@ -348,7 +348,7 @@ func (r *Runner) addProcess(ctx context.Context, b *packetBuild, p brief.Params,
 		if !row.Ship {
 			continue
 		}
-		c, err := r.processCandidate(ctx, row, at)
+		c, err := r.processCandidate(ctx, row, p.CapitalGp, at)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -362,7 +362,7 @@ func (r *Runner) addProcess(ctx context.Context, b *packetBuild, p brief.Params,
 	return nil
 }
 
-func (r *Runner) processCandidate(ctx context.Context, row *store.PacketRow, at time.Time) (*candidate, error) {
+func (r *Runner) processCandidate(ctx context.Context, row *store.PacketRow, budgetGp int64, at time.Time) (*candidate, error) {
 	detail, err := r.Store.ProcessDetailByID(ctx, row.RecipeID)
 	if err != nil {
 		return nil, err
@@ -382,7 +382,7 @@ func (r *Runner) processCandidate(ctx context.Context, row *store.PacketRow, at 
 	if name == "" {
 		return nil, fmt.Errorf("item %d has no name", *row.OutputItem)
 	}
-	raw, err := processDraft(row, snap, detail.Quote.FeeGp, name, at)
+	raw, err := processDraft(row, snap, detail.Quote.FeeGp, name, budgetGp, at)
 	if err != nil {
 		return nil, err
 	}
@@ -399,8 +399,10 @@ func (r *Runner) processCandidate(ctx context.Context, row *store.PacketRow, at 
 }
 
 // processDraft fills in what the directive's lane P spec has a strategy copy from
-// process_quote's harness numbers.
-func processDraft(row *store.PacketRow, snap *eval.ProcessSnap, feeGp float64, outputName string, at time.Time) (json.RawMessage, error) {
+// process_quote's harness numbers. This snapshot is newer than the one the recipe was
+// judged on, so a price that moved can break what the agent's validator holds it to, and
+// one bad draft rejects the whole report.
+func processDraft(row *store.PacketRow, snap *eval.ProcessSnap, feeGp float64, outputName string, budgetGp int64, at time.Time) (json.RawMessage, error) {
 	if snap.GrossIn == nil || snap.MarginSlow == nil || row.UnitsPer4h == nil || row.GpHr == nil {
 		return nil, errors.New("the recipe lost a price")
 	}
@@ -408,6 +410,9 @@ func processDraft(row *store.PacketRow, snap *eval.ProcessSnap, feeGp float64, o
 	entry := int64(math.Round(rawEntry))
 	exit := int64(math.Round(rawEntry + *snap.MarginSlow))
 	units := *row.UnitsPer4h
+	if exit <= entry || units*entry > budgetGp {
+		return nil, errors.New("the price moved since the recipe was judged")
+	}
 	recipe := row.RecipeID
 	d := strategyDraft{
 		ID:              draftID("P", fmt.Sprintf("%s r%d", outputName, recipe), at),

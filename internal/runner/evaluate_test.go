@@ -196,7 +196,7 @@ func TestProcessDraftCopiesTheHarnessNumbers(t *testing.T) {
 	in, margin := 15830.0, 1010.0
 	output, units, gpHr := 2509, int64(2036), int64(430079)
 	row := &store.PacketRow{RecipeID: 17, OutputItem: &output, UnitsPer4h: &units, GpHr: &gpHr}
-	raw, err := processDraft(row, &eval.ProcessSnap{GrossIn: &in, MarginSlow: &margin}, 0, "Black dragon leather", packetDay)
+	raw, err := processDraft(row, &eval.ProcessSnap{GrossIn: &in, MarginSlow: &margin}, 0, "Black dragon leather", 50_000_000, packetDay)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,8 +224,21 @@ func TestProcessDraftCopiesTheHarnessNumbers(t *testing.T) {
 func TestProcessDraftRefusesALostPrice(t *testing.T) {
 	output, units, gpHr := 2509, int64(2036), int64(430079)
 	row := &store.PacketRow{RecipeID: 17, OutputItem: &output, UnitsPer4h: &units, GpHr: &gpHr}
-	if _, err := processDraft(row, &eval.ProcessSnap{}, 0, "x", packetDay); err == nil {
+	if _, err := processDraft(row, &eval.ProcessSnap{}, 0, "x", 50_000_000, packetDay); err == nil {
 		t.Error("a recipe with no prices got a draft")
+	}
+}
+
+// The validator would reject the whole report for either of these.
+func TestProcessDraftRefusesAMovedPrice(t *testing.T) {
+	output, units, gpHr := 2509, int64(2036), int64(430079)
+	row := &store.PacketRow{RecipeID: 17, OutputItem: &output, UnitsPer4h: &units, GpHr: &gpHr}
+	in, margin, loss := 15830.0, 1010.0, -5.0
+	if _, err := processDraft(row, &eval.ProcessSnap{GrossIn: &in, MarginSlow: &margin}, 0, "x", units*15829, packetDay); err == nil {
+		t.Error("a draft over the budget")
+	}
+	if _, err := processDraft(row, &eval.ProcessSnap{GrossIn: &in, MarginSlow: &loss}, 0, "x", 50_000_000, packetDay); err == nil {
+		t.Error("a draft with no margin")
 	}
 }
 

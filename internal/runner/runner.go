@@ -233,7 +233,7 @@ func (r *Runner) execute(runID int64, workspace, briefPath string, run *activeRu
 		return
 	}
 
-	if err := r.ingest(ctx, runID, run.params, workspace, reportPath); err != nil {
+	if err := r.ingest(ctx, runID, run.params, run.evaluate, workspace, reportPath); err != nil {
 		r.fail(ctx, runID, "ingest: "+err.Error())
 		return
 	}
@@ -270,7 +270,7 @@ func (r *Runner) ingestStats(ctx context.Context, runID int64, workspace string)
 }
 
 // ingest stores the report markdown + parses the sidecar strategies.
-func (r *Runner) ingest(ctx context.Context, runID int64, p brief.Params, workspace, reportPath string) error {
+func (r *Runner) ingest(ctx context.Context, runID int64, p brief.Params, evaluate bool, workspace, reportPath string) error {
 	full := reportPath
 	if !filepath.IsAbs(full) {
 		full = filepath.Join(workspace, reportPath)
@@ -321,6 +321,13 @@ func (r *Runner) ingest(ctx context.Context, runID int64, p brief.Params, worksp
 	for _, v := range sc.SignalVerdicts {
 		if err := r.Store.ResolveSignal(ctx, int64(v.SignalID), v.Verdict, v.Reason); err != nil {
 			log.Printf("run %d: resolve signal %d: %v", runID, v.SignalID, err)
+		}
+	}
+	// An evaluate run was shown each of its signals' candidates, so silence is a pass.
+	// Released, the same candidates would come straight back with nothing new.
+	if evaluate {
+		if err := r.Store.DismissUnanswered(ctx, runID, fmt.Sprintf("no verdict: run %d saw it and shipped nothing", runID)); err != nil {
+			log.Printf("run %d: dismiss unanswered signals: %v", runID, err)
 		}
 	}
 	if err := r.Store.ReleaseRunSignals(ctx, runID); err != nil {

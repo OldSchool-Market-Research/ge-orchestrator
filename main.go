@@ -134,6 +134,10 @@ func main() {
 				n := col.Cycle(ctx)
 				if n > 0 {
 					log.Printf("collector: %d new signal(s)", n)
+				}
+				// A packet finds its own candidates, so it needs no new signal to look. The
+				// look costs a database read, and starts nothing if nothing is new.
+				if n > 0 || signalRunMode == runner.ModeEvaluate {
 					maybeTriggerOnSignals(ctx, st, r, signalCooldown)
 				}
 				time.Sleep(collectEvery)
@@ -230,7 +234,7 @@ func maybeTriggerOnSignals(ctx context.Context, st *store.Store, r *runner.Runne
 		log.Printf("trigger-on-signals: %v", err)
 		return
 	}
-	log.Printf("trigger-on-signals: new signals queued, started run %d", runID)
+	log.Printf("trigger-on-signals: started run %d", runID)
 }
 
 // agentEnvPassthrough forwards every GE_AGENT_* var from the pod
