@@ -117,8 +117,9 @@ func main() {
 	log.Printf("evaluator: every %s (trigger-on-empty cooldown: %s)", evalEvery, emptyCooldown)
 
 	// Trend collector: deterministic full-market sweeps on their own ticker.
-	// New signals can trigger a research run (with its own cooldown) so the
-	// system reacts to fresh anomalies without waiting for the schedule.
+	// Each cycle can trigger a run (with its own cooldown) so the system reacts to
+	// fresh anomalies without waiting for the schedule: an evaluate run when anything
+	// new clears the rules, or in research mode a research run on new signals.
 	collectEvery := durEnv("GE_ORCH_COLLECT_INTERVAL", time.Hour)
 	signalCooldown := durEnv("GE_ORCH_SIGNAL_COOLDOWN", 30*time.Minute)
 	if collectEvery > 0 {
@@ -136,7 +137,8 @@ func main() {
 					log.Printf("collector: %d new signal(s)", n)
 				}
 				// A packet finds its own candidates, so it needs no new signal to look. The
-				// look costs a database read, and starts nothing if nothing is new.
+				// look is a packet build, under the runner's lock, and starts no run if
+				// nothing is new.
 				if n > 0 || signalRunMode == runner.ModeEvaluate {
 					maybeTriggerOnSignals(ctx, st, r, signalCooldown)
 				}
@@ -207,8 +209,8 @@ func maybeTriggerOnEmpty(ctx context.Context, st *store.Store, r *runner.Runner,
 	log.Printf("trigger-on-empty: portfolio empty, started run %d", runID)
 }
 
-// maybeTriggerOnSignals starts a run when the collector queued new signals — the
-// reaction-speed path. Same DB-anchored cooldown discipline as
+// maybeTriggerOnSignals starts a signal run, the reaction-speed path. Same
+// DB-anchored cooldown discipline as
 // trigger-on-empty so restarts and manual runs count toward it.
 func maybeTriggerOnSignals(ctx context.Context, st *store.Store, r *runner.Runner, cooldown time.Duration) {
 	if r.ActiveRunID() != 0 {

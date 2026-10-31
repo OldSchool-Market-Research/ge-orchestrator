@@ -249,8 +249,9 @@ where they came from. P1 starts recording that, in log mode.
   prices and sizes them, and passes each through `vetOne`. The model gets the result in
   its brief, `submit_report` as its only tool, and `EVALUATE.md` as its directive. Every
   candidate carries a signal, so it owes a verdict, and a dismissal keeps it out under the
-  usual cooldown and repeat guard: the model reads what's new, and no run starts when
-  nothing is. Signals the rules refuse are dismissed with a `script:` reason, which cools
+  usual cooldown and repeat guard, as does silence unless the item shipped: the model reads
+  what's new, and no run starts when nothing is. The collector looks every cycle, since a
+  candidate can clear the rules with no new signal. Signals the rules refuse are dismissed with a `script:` reason, which cools
   the collector's re-queue but counts as nobody's verdict; a failed lookup leaves them
   queued. The 6h schedule, manual and empty-book runs stay full research, and V's signals
   wait for them. `GE_ORCH_SIGNAL_RUN_MODE=research` turns the whole thing off.
