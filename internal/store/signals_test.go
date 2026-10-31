@@ -257,6 +257,69 @@ func TestUpsertSignalEscapeSkipsNullScores(t *testing.T) {
 	}
 }
 
+// The script's refusals cool the collector's re-queue but falsify nothing: no repeat
+// count, no prior verdict in a brief, and a candidate that clears the rules comes back.
+// Needs STORE_TEST_DSN.
+func TestScriptDismissalsAreNotVerdicts(t *testing.T) {
+	dsn := os.Getenv("STORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("STORE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	const item, cooldown = 987656, 48 * time.Hour
+	cleanup := func() { s.Pool.Exec(ctx, `DELETE FROM orchestrator.signals WHERE item_id=$1`, item) }
+	cleanup()
+	defer cleanup()
+	seed := func(ago string) {
+		t.Helper()
+		if _, err := s.Pool.Exec(ctx, `INSERT INTO orchestrator.signals
+			(kind, item_id, item_name, metrics, status, reason, resolved_at)
+			VALUES ('combo', $1, 'x', '{"budget_cycle_gp":300000}'::jsonb, 'dismissed', 'script: lookup', now() - $2::interval)`, item, ago); err != nil {
+			t.Fatal(err)
+		}
+	}
+	metrics := map[string]any{"budget_cycle_gp": 300000}
+
+	seed("1 hour")
+	if isNew, err := s.UpsertSignal(ctx, "combo", item, "x", metrics, cooldown); err != nil || isNew {
+		t.Errorf("inside the cooldown the collector stays out: new=%v err=%v", isNew, err)
+	}
+	if at, reason, err := s.LatestDismissal(ctx, "combo", item); err != nil || at != nil || reason != nil {
+		t.Errorf("a script refusal reads as a prior verdict: %v %v %v", at, reason, err)
+	}
+	id, isNew, err := s.UpsertCandidateSignal(ctx, "combo", item, "x", metrics, cooldown)
+	if err != nil || !isNew || id == 0 {
+		t.Fatalf("a candidate passing now comes back: id=%d new=%v err=%v", id, isNew, err)
+	}
+	if _, isNew, err := s.UpsertCandidateSignal(ctx, "combo", item, "x", metrics, cooldown); err != nil || isNew {
+		t.Errorf("a live signal only refreshes: new=%v err=%v", isNew, err)
+	}
+	cleanup()
+
+	// Past the cooldown, two refusals don't trip the repeat guard.
+	seed("4 days")
+	seed("3 days")
+	if isNew, err := s.UpsertSignal(ctx, "combo", item, "x", metrics, cooldown); err != nil || !isNew {
+		t.Errorf("script refusals tripped the repeat guard: new=%v err=%v", isNew, err)
+	}
+	cleanup()
+
+	// A run's verdict holds a candidate out, the same as it holds out the collector.
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO orchestrator.signals
+		(kind, item_id, item_name, metrics, status, reason, resolved_at)
+		VALUES ('combo', $1, 'x', '{"budget_cycle_gp":300000}'::jsonb, 'dismissed', 'margin_collapse', now() - interval '1 hour')`, item); err != nil {
+		t.Fatal(err)
+	}
+	if _, isNew, err := s.UpsertCandidateSignal(ctx, "combo", item, "x", metrics, cooldown); err != nil || isNew {
+		t.Errorf("a verdict didn't hold the candidate out: new=%v err=%v", isNew, err)
+	}
+}
+
 // A run orphaned by a restart gives its assigned signals back, or their items
 // could never queue again. Needs STORE_TEST_DSN.
 func TestOrphanRunningRunsReleasesSignals(t *testing.T) {

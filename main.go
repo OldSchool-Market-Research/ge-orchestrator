@@ -90,8 +90,9 @@ func main() {
 			CalVetoEnforce:    calVetoEnforce,
 			GraveyardCooldown: graveyardCooldown,
 
-			SignalRunMode:     signalRunMode,
-			EvaluateDirective: getenv("GE_ORCH_EVALUATE_DIRECTIVE", "/etc/ge-agent/EVALUATE.md"),
+			SignalRunMode:         signalRunMode,
+			EvaluateDirective:     getenv("GE_ORCH_EVALUATE_DIRECTIVE", "/etc/ge-agent/EVALUATE.md"),
+			SignalDismissCooldown: max(durEnv("GE_ORCH_SIGNAL_DISMISS_COOLDOWN", 48*time.Hour), 0),
 		},
 		Store:  st,
 		Hub:    runner.NewHub(),

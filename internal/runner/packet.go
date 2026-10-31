@@ -84,7 +84,7 @@ func (r *Runner) buildProcessPacket(ctx context.Context, p brief.Params) ([]stor
 			return nil, ctx.Err()
 		}
 		if err != nil {
-			row.Why = "lookup failed: " + err.Error()
+			row.Why = lookupFailed + err.Error()
 		} else {
 			judgeRecipe(&row, snap, q.FeeGp, p.CapitalGp)
 		}
@@ -107,7 +107,13 @@ func judgeRecipe(row *store.PacketRow, snap *eval.ProcessSnap, feeGp float64, bu
 	if units := eval.ProcessUnitsPer4h(snap, budgetGp); units > 0 { // 0 would project at the market rate, not at no size
 		row.UnitsPer4h = &units
 		row.GpHr = eval.ProjectProcessPer1h(snap, units)
-		why = sizeConsistencyVeto(copiedSize(units, *snap.GrossIn, feeGp), budgetGp)
+		size := copiedSize(units, *snap.GrossIn, feeGp)
+		why = sizeConsistencyVeto(size, budgetGp)
+		// The vet's tolerance stops short of the agent's validator: it holds capital to
+		// the budget exactly, and one strategy over it rejects the whole report.
+		if why == "" && size.CapitalRequired > budgetGp {
+			why = fmt.Sprintf("capital_required %d is over the %d research budget", size.CapitalRequired, budgetGp)
+		}
 	}
 	if why == "" {
 		why = processVeto(snap, row.GpHr)

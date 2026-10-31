@@ -30,15 +30,17 @@ const (
 	evaluateMaxTurns = 6
 	// comboScan is how many sweep rows a packet looks through for ones that clear the floor.
 	comboScan = 100
-	// comboMaxCandidates caps what the model reads. Assigned signals always make the list.
+	// comboMaxCandidates caps what the model reads. Signals already queued always make the list.
 	comboMaxCandidates = 15
 	// signalBatch is how many of the queue's C and P signals one evaluate run answers.
 	signalBatch = 20
+	// lookupFailed starts a fate that says nothing about the item: its signal stays queued.
+	lookupFailed = "lookup failed: "
 	// marginHistoryDays is the window behind a candidate's margin_days_positive.
 	marginHistoryDays = 14
 )
 
-// ErrNothingToEvaluate means the packet came back empty, so no run started and nothing
+// ErrNothingToEvaluate means nothing new cleared the rules, so no run started and nothing
 // was spent. The next collector cycle tries again.
 var ErrNothingToEvaluate = errors.New("nothing to evaluate")
 
@@ -97,7 +99,8 @@ type comboLegFacts struct {
 }
 
 // comboFacts is a conversion as the model judges it. Nil numbers are nulls kept as
-// nulls: a margin history that couldn't be read, never a zero.
+// nulls: a margin history that couldn't be read, never a zero. The script refuses a
+// null harness_gp_per_1h, because that means no margin survives slippage.
 type comboFacts struct {
 	Relation           string          `json:"relation"`
 	Kind               string          `json:"kind"`
@@ -130,18 +133,34 @@ type processFacts struct {
 	Notes           *string           `json:"notes,omitempty"`
 	GpHr            *int64            `json:"gp_hr"`
 	ActionsPerHour  float64           `json:"actions_per_hour"`
+	Throughput      string            `json:"throughput"`
+	PlayerRate      *float64          `json:"player_actions_per_hour"`
+	LimitRate       *float64          `json:"limit_actions_per_hour"`
+	MarketRate      *float64          `json:"market_actions_per_hour"`
 	Hours24h        int               `json:"hours_24h"`
 	HoursAtFloor24h int               `json:"hours_at_floor_24h"`
 	MaxLegAgeS      *int64            `json:"max_leg_age_s"`
 	Legs            []processLegFacts `json:"legs"`
 }
 
-// packetBuild is one evaluate run's material. fate maps a lane and item to the empty
-// string for a candidate, otherwise why the script refused it.
+// packetBuild is what cleared the rules, before admit picks what the model reads. fate
+// maps a lane and item to the empty string for a pass, otherwise why the script refused
+// it. unread marks a lane whose silence on an item proves nothing.
 type packetBuild struct {
-	candidates []candidate
-	liveRows   []store.PacketRow
-	fate       map[packetKey]string
+	combos   []*comboBuilt // best first, one per output item
+	recipes  []recipeBuilt // best paid first
+	liveRows []store.PacketRow
+	fate     map[packetKey]string
+	unread   map[string]bool
+}
+
+// refuse records why an item was turned down. A failed lookup outranks a rule: the row
+// it hid might have passed.
+func (b *packetBuild) refuse(key packetKey, why string) {
+	if cur, seen := b.fate[key]; seen && strings.HasPrefix(cur, lookupFailed) {
+		return
+	}
+	b.fate[key] = why
 }
 
 type packetKey struct {
@@ -158,21 +177,23 @@ func (r *Runner) startEvaluate(ctx context.Context, p brief.Params, source strin
 	if err != nil {
 		return 0, err
 	}
-	build, err := r.buildPacket(buildCtx, p, at, signals)
+	build, err := r.buildPacket(buildCtx, p, at)
 	if err != nil {
 		return 0, fmt.Errorf("packet: %w", err)
 	}
-	assigned, dismiss := splitSignals(signals, build.fate)
+	assigned, dismiss := splitSignals(signals, build.fate, build.unread)
 	for id, reason := range dismiss {
 		if err := r.Store.ResolveSignal(ctx, id, "dismissed", reason); err != nil {
 			log.Printf("evaluate: resolve signal %d: %v", id, err)
 		}
 	}
-	if len(build.candidates) == 0 {
+	candidates, added := r.admit(buildCtx, build, signals)
+	assigned = append(assigned, added...)
+	if len(candidates) == 0 {
 		return 0, ErrNothingToEvaluate
 	}
-	lines := make([]string, 0, len(build.candidates))
-	for _, c := range build.candidates {
+	lines := make([]string, 0, len(candidates))
+	for _, c := range candidates {
 		raw, err := json.Marshal(c)
 		if err != nil {
 			return 0, err
@@ -187,18 +208,66 @@ func (r *Runner) startEvaluate(ctx context.Context, p brief.Params, source strin
 	if err != nil {
 		return 0, err
 	}
-	log.Printf("run %d: evaluate: %d candidates, %d signals assigned, %d dismissed by the script (%d byte brief)",
-		runID, len(build.candidates), len(assigned), len(dismiss), len(briefText))
+	log.Printf("run %d: evaluate: %d candidates, %d signals assigned, %d dismissed by the script (%d byte brief, built in %s)",
+		runID, len(candidates), len(assigned), len(dismiss), len(briefText), time.Since(at).Round(time.Millisecond))
 	return runID, nil
 }
 
+// admit picks what the model reads, best first. A signal already queued always gets a
+// look, and anything else needs a new signal of its own, so every candidate owes a
+// verdict and a recent dismissal (UpsertCandidateSignal's guards) keeps it out. Without
+// this each hourly run re-judges the same list with no memory of refusing it, and each
+// is a fresh chance to ship what the last one turned down.
+func (r *Runner) admit(ctx context.Context, b *packetBuild, signals []store.Signal) ([]candidate, []store.Signal) {
+	queued := map[packetKey]bool{}
+	for _, sig := range signals {
+		queued[packetKey{laneOfKind(sig.Kind), sig.ItemID}] = true
+	}
+	var added []store.Signal
+	signal := func(kind string, item int, name string, metrics any) bool {
+		id, isNew, err := r.Store.UpsertCandidateSignal(ctx, kind, item, name, metrics, r.Cfg.SignalDismissCooldown)
+		if err != nil {
+			log.Printf("evaluate: signal %s %d: %v", kind, item, err)
+			return false
+		}
+		if isNew {
+			added = append(added, store.Signal{SignalID: id, Kind: kind, ItemID: item, ItemName: name})
+		}
+		return isNew
+	}
+	var kept []*comboBuilt
+	for _, c := range b.combos {
+		item := c.row.PrimaryItemID
+		if queued[packetKey{"C", item}] || (len(kept) < comboMaxCandidates && signal("combo", item, c.row.PrimaryName, c.row)) {
+			kept = append(kept, c)
+		}
+	}
+	r.addMarginHistory(ctx, kept)
+	var out []candidate
+	for _, c := range kept {
+		out = append(out, candidate{Lane: "C", Facts: c.facts, Draft: c.draft})
+	}
+	for _, rb := range b.recipes {
+		item := *rb.row.OutputItem
+		if queued[packetKey{"P", item}] || signal("process", item, rb.row.Name, rb.metrics()) {
+			out = append(out, rb.cand)
+			continue
+		}
+		rb.row.Ship, rb.row.Why = false, "held out by a recent verdict"
+	}
+	return out, added
+}
+
 // splitSignals sends the signals with a candidate to the model and answers the rest
-// from the script's own reason, so a signal the rules already refuse costs nothing.
-func splitSignals(signals []store.Signal, fate map[packetKey]string) (assigned []store.Signal, dismiss map[int64]string) {
+// from the script's own reason. A signal whose item couldn't be read stays queued.
+func splitSignals(signals []store.Signal, fate map[packetKey]string, unread map[string]bool) (assigned []store.Signal, dismiss map[int64]string) {
 	dismiss = map[int64]string{}
 	for _, sig := range signals {
-		why, known := fate[packetKey{laneOfKind(sig.Kind), sig.ItemID}]
+		lane := laneOfKind(sig.Kind)
+		why, known := fate[packetKey{lane, sig.ItemID}]
 		switch {
+		case strings.HasPrefix(why, lookupFailed), !known && unread[lane]:
+			continue
 		case !known:
 			dismiss[sig.SignalID] = "script: no longer clears the floor at a fillable size"
 		case why != "":
@@ -218,23 +287,40 @@ func laneOfKind(kind string) string {
 }
 
 // buildPacket judges both lanes. A lane's whole-lane failure fails the build: half a
-// packet would dismiss the other lane's signals for no reason.
-func (r *Runner) buildPacket(ctx context.Context, p brief.Params, at time.Time, signals []store.Signal) (*packetBuild, error) {
+// packet would dismiss the other lane's signals for no reason. A lane that's switched
+// off proves nothing either, so research runs keep its signals, as they always have.
+func (r *Runner) buildPacket(ctx context.Context, p brief.Params, at time.Time) (*packetBuild, error) {
 	if r.Prices == nil {
 		return nil, errors.New("no price source")
 	}
-	b := &packetBuild{fate: map[packetKey]string{}}
+	b := &packetBuild{fate: map[packetKey]string{}, unread: map[string]bool{}}
 	if w, ok := p.Archetypes["C"]; !ok || w > 0 {
-		if err := r.addCombo(ctx, b, p, at, signals); err != nil {
+		if err := r.addCombo(ctx, b, p, at); err != nil {
 			return nil, fmt.Errorf("lane C: %w", err)
 		}
+	} else {
+		b.unread["C"] = true
 	}
 	if w, ok := p.Archetypes["P"]; !ok || w > 0 {
 		if err := r.addProcess(ctx, b, p, at); err != nil {
 			return nil, fmt.Errorf("lane P: %w", err)
 		}
+	} else {
+		b.unread["P"] = true
 	}
 	return b, nil
+}
+
+// recipeBuilt is one recipe that cleared the rules. row points into the packet's rows.
+type recipeBuilt struct {
+	row  *store.PacketRow
+	cand candidate
+}
+
+// metrics is the recipe's signal, under the collector's JSON names.
+func (rb recipeBuilt) metrics() map[string]any {
+	return map[string]any{"recipe_id": rb.row.RecipeID, "name": rb.row.Name, "category": rb.row.Category,
+		"output_item": *rb.row.OutputItem, "gp_hr": *rb.row.GpHr}
 }
 
 // addProcess turns the lane's existing packet rows into candidates.
@@ -247,6 +333,10 @@ func (r *Runner) addProcess(ctx context.Context, b *packetBuild, p brief.Params,
 	for i := range rows {
 		row := &rows[i]
 		if row.OutputItem == nil {
+			// A failed read can't name its output, so any recipe's signal could be this one.
+			if strings.HasPrefix(row.Why, lookupFailed) {
+				b.unread["P"] = true
+			}
 			continue
 		}
 		key := packetKey{"P", *row.OutputItem}
@@ -259,12 +349,15 @@ func (r *Runner) addProcess(ctx context.Context, b *packetBuild, p brief.Params,
 			continue
 		}
 		c, err := r.processCandidate(ctx, row, at)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil {
-			row.Ship, row.Why = false, "lookup failed: "+err.Error()
+			row.Ship, row.Why = false, lookupFailed+err.Error()
 			b.fate[key] = row.Why
 			continue
 		}
-		b.candidates = append(b.candidates, *c)
+		b.recipes = append(b.recipes, recipeBuilt{row, *c})
 	}
 	return nil
 }
@@ -285,14 +378,19 @@ func (r *Runner) processCandidate(ctx context.Context, row *store.PacketRow, at 
 	if err != nil {
 		return nil, err
 	}
-	raw, err := processDraft(row, snap, detail.Quote.FeeGp, names[*row.OutputItem], at)
+	name := names[*row.OutputItem]
+	if name == "" {
+		return nil, fmt.Errorf("item %d has no name", *row.OutputItem)
+	}
+	raw, err := processDraft(row, snap, detail.Quote.FeeGp, name, at)
 	if err != nil {
 		return nil, err
 	}
 	facts := processFacts{
 		Recipe: row.Name, Category: row.Category, Notes: detail.Notes, GpHr: row.GpHr,
 		ActionsPerHour: float64(*row.UnitsPer4h) / 4,
-		Hours24h:       row.Hours24h, HoursAtFloor24h: row.HoursAtFloor24h, MaxLegAgeS: row.MaxLegAgeS,
+		Throughput:     snap.Throughput, PlayerRate: snap.ActionsPerHour, LimitRate: snap.LimitRate, MarketRate: snap.MarketRate,
+		Hours24h: row.Hours24h, HoursAtFloor24h: row.HoursAtFloor24h, MaxLegAgeS: row.MaxLegAgeS,
 	}
 	for _, l := range detail.Legs {
 		facts.Legs = append(facts.Legs, processLegFacts{Side: l.Side, Item: l.Name, Qty: l.Qty, Price: l.PriceSlow, AgeS: l.SlowAgeS})
@@ -312,7 +410,7 @@ func processDraft(row *store.PacketRow, snap *eval.ProcessSnap, feeGp float64, o
 	units := *row.UnitsPer4h
 	recipe := row.RecipeID
 	d := strategyDraft{
-		ID:              draftID("P", outputName, at),
+		ID:              draftID("P", fmt.Sprintf("%s r%d", outputName, recipe), at),
 		Archetype:       "P",
 		Items:           []draftItem{{Name: outputName, ID: *row.OutputItem}},
 		EntryPrice:      entry,
@@ -327,7 +425,7 @@ func processDraft(row *store.PacketRow, snap *eval.ProcessSnap, feeGp float64, o
 
 // addCombo vets each conversion that clears the floor at a fillable size, then keeps the
 // biggest per output item.
-func (r *Runner) addCombo(ctx context.Context, b *packetBuild, p brief.Params, at time.Time, signals []store.Signal) error {
+func (r *Runner) addCombo(ctx context.Context, b *packetBuild, p brief.Params, at time.Time) error {
 	rows, err := r.Store.ComboCandidates(ctx, p.CapitalGp, comboScan)
 	if err != nil {
 		return err
@@ -337,11 +435,7 @@ func (r *Runner) addCombo(ctx context.Context, b *packetBuild, p brief.Params, a
 		return err
 	}
 	rec := r.loadRecord(ctx)
-	type passed struct {
-		row   store.ComboCandidate
-		built *comboBuilt
-	}
-	var ships []passed
+	var ships []*comboBuilt
 	for _, row := range rows {
 		key := packetKey{"C", row.PrimaryItemID}
 		if open[row.RelationID] {
@@ -360,51 +454,36 @@ func (r *Runner) addCombo(ctx context.Context, b *packetBuild, p brief.Params, a
 			reason, proj := r.vetOne(ctx, p, st, rec, &rel)
 			why = strings.TrimPrefix(reason, "vetoed at ship time: ")
 			built.facts.HarnessGpPer1h = proj
+			if why == "" && proj == nil { // every leg is priced by now, so it's the haircut
+				why = "no margin survives the harness's slippage"
+			}
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if why != "" {
-			if fate, seen := b.fate[key]; !seen || fate != "" {
-				b.fate[key] = why
-			}
+			b.refuse(key, why)
 			continue
 		}
-		ships = append(ships, passed{row, built})
+		built.row = row
+		ships = append(ships, built)
 	}
-	sort.SliceStable(ships, func(i, j int) bool { return ships[i].built.perCycle > ships[j].built.perCycle })
-
-	// A signal that clears the rules gets a look however it ranks.
-	wanted := map[int]bool{}
-	for _, sig := range signals {
-		if sig.Kind == "combo" {
-			wanted[sig.ItemID] = true
-		}
-	}
-	var kept []*comboBuilt
+	sort.SliceStable(ships, func(i, j int) bool { return ships[i].perCycle > ships[j].perCycle })
 	taken := map[int]bool{}
 	for _, s := range ships {
-		key := packetKey{"C", s.row.PrimaryItemID}
 		if taken[s.row.PrimaryItemID] {
 			continue // the vet's dedup keys on the item, so one conversion per output
 		}
 		taken[s.row.PrimaryItemID] = true
-		b.fate[key] = ""
-		if len(kept) < comboMaxCandidates || wanted[s.row.PrimaryItemID] {
-			kept = append(kept, s.built)
-		} else {
-			delete(b.fate, key) // not refused, only left for a later run
-		}
-	}
-	r.addMarginHistory(ctx, kept)
-	for _, built := range kept {
-		b.candidates = append(b.candidates, candidate{Lane: "C", Facts: built.facts, Draft: built.draft})
+		b.fate[packetKey{"C", s.row.PrimaryItemID}] = ""
+		b.combos = append(b.combos, s)
 	}
 	return nil
 }
 
 // comboBuilt is one priced conversion on its way to a candidate.
 type comboBuilt struct {
+	row      store.ComboCandidate
 	draft    json.RawMessage
 	facts    comboFacts
 	perCycle int64
@@ -418,7 +497,7 @@ type comboBuilt struct {
 func (r *Runner) buildCombo(ctx context.Context, c store.ComboCandidate, p brief.Params, at time.Time) (*comboBuilt, string) {
 	rel, err := r.Store.RelationByID(ctx, c.RelationID)
 	if err != nil {
-		return nil, "lookup failed: " + err.Error()
+		return nil, lookupFailed + err.Error()
 	}
 	if rel == nil {
 		return nil, fmt.Sprintf("relation %d is gone", c.RelationID)
@@ -433,19 +512,19 @@ func (r *Runner) buildCombo(ctx context.Context, c store.ComboCandidate, p brief
 	}
 	snaps, err := r.Prices.SnapshotMany(ctx, ids)
 	if err != nil {
-		return nil, "lookup failed: " + err.Error()
+		return nil, lookupFailed + err.Error()
 	}
 	limits, err := r.Store.BuyLimits(ctx, ids)
 	if err != nil {
-		return nil, "lookup failed: " + err.Error()
+		return nil, lookupFailed + err.Error()
 	}
 	names, err := r.Store.ItemNames(ctx, ids)
 	if err != nil {
-		return nil, "lookup failed: " + err.Error()
+		return nil, lookupFailed + err.Error()
 	}
 	notes, err := r.Store.RelationNotes(ctx, c.RelationID)
 	if err != nil {
-		return nil, "lookup failed: " + err.Error()
+		return nil, lookupFailed + err.Error()
 	}
 	return sizeCombo(c, buys, sells, snaps, limits, names, notes, p.CapitalGp, at)
 }
@@ -461,6 +540,9 @@ func sizeCombo(c store.ComboCandidate, buys, sells []store.RelationLeg, snaps ma
 	vol, bound := int64(-1), int64(-1)
 	seen := map[int]bool{}
 	addLeg := func(l store.RelationLeg, side string) string {
+		if names[l.ItemID] == "" {
+			return fmt.Sprintf("item %d has no name", l.ItemID) // the validator rejects a report with one
+		}
 		snap := snaps[l.ItemID]
 		if snap == nil {
 			return fmt.Sprintf("%s has no snapshot", names[l.ItemID])
@@ -471,6 +553,11 @@ func sizeCombo(c store.ComboCandidate, buys, sells []store.RelationLeg, snaps ma
 		}
 		if price == nil {
 			return fmt.Sprintf("%s has no %s price right now", names[l.ItemID], side)
+		}
+		// An old high inflates the margin, and the evaluator would call it stale from
+		// the first tick. The model can't re-quote, so the script holds the same bar.
+		if !eval.LegFresh(age, trades) {
+			return fmt.Sprintf("%s's %s quote is stale for how often it trades", names[l.ItemID], side)
 		}
 		if side == "buy" {
 			entry += *price * l.Qty
@@ -483,10 +570,8 @@ func sizeCombo(c store.ComboCandidate, buys, sells []store.RelationLeg, snaps ma
 		if legVol := eval.LegConversions(snap, l.Qty); vol < 0 || legVol < vol {
 			vol = legVol
 		}
-		if age != nil && trades > 0 {
-			if ratio := float64(*age) * float64(trades) / 86400; worst == nil || ratio > *worst {
-				worst = &ratio
-			}
+		if ratio := float64(*age) * float64(trades) / 86400; worst == nil || ratio > *worst {
+			worst = &ratio
 		}
 		legs = append(legs, store.Leg{ItemID: l.ItemID, Name: names[l.ItemID], Side: side, Qty: l.Qty, Price: *price})
 		if !seen[l.ItemID] {
@@ -533,7 +618,7 @@ func sizeCombo(c store.ComboCandidate, buys, sells []store.RelationLeg, snaps ma
 		name += " reverse"
 	}
 	raw, err := json.Marshal(strategyDraft{
-		ID:              draftID("C", name, at),
+		ID:              draftID("C", fmt.Sprintf("%s r%d", name, relation), at),
 		Archetype:       "C",
 		Items:           items,
 		EntryPrice:      entry,
@@ -667,7 +752,9 @@ func roiPct(entry, exit int64) float64 {
 
 var draftSlugRe = regexp.MustCompile(`[^a-z0-9]+`)
 
-// draftID follows the agent's id rule: <lane>-<item-slug>-<yyyymmdd>.
+// draftID follows the agent's id rule: <lane>-<item-slug>-<yyyymmdd>. Callers put the
+// relation or recipe id in name: the slug drops the "+" between Anti-venom 3<->4 and
+// Anti-venom+ 3<->4, and two ships with one id fail the whole run at ingest.
 func draftID(lane, name string, at time.Time) string {
 	slug := strings.Trim(draftSlugRe.ReplaceAllString(strings.ToLower(name), "-"), "-")
 	return fmt.Sprintf("%s-%s-%s", lane, slug, at.Format("20060102"))

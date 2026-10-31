@@ -110,6 +110,11 @@ func TestSizeComboRefusals(t *testing.T) {
 		{"no snapshot", func(s map[int]*eval.Snap, _ map[int]int64) { delete(s, 2) }, "no snapshot"},
 		{"no limits", func(_ map[int]*eval.Snap, l map[int]int64) { delete(l, 1); delete(l, 2) }, "known limit"},
 		{"no margin", func(s map[int]*eval.Snap, _ map[int]int64) { *s[3].High = 3_000_000 }, "no margin"},
+		// 8h old at 4 prints a day is past the 6h cap, and no prints at all is never fresh.
+		{"stale for its cadence", func(s map[int]*eval.Snap, _ map[int]int64) {
+			s[3].HighAgeS, s[3].HighTicks24h = secs(8*3600), 4
+		}, "stale"},
+		{"no prints in 24h", func(s map[int]*eval.Snap, _ map[int]int64) { s[3].HighTicks24h = 0 }, "stale"},
 		{"too thin", func(s map[int]*eval.Snap, _ map[int]int64) { s[3].Vol4h = 5 }, "can't fill"},
 		// One conversion at 15% of 10: 430k would clear, so shrink the margin to fail on the floor.
 		{"under the floor", func(s map[int]*eval.Snap, _ map[int]int64) {
@@ -140,15 +145,47 @@ func TestSizeComboReverseNamesItself(t *testing.T) {
 	if err := json.Unmarshal(got.draft, &st); err != nil {
 		t.Fatal(err)
 	}
-	if st.ID != "C-blade-hilt-reverse-20261031" {
+	if st.ID != "C-blade-hilt-reverse-r7-20261031" {
 		t.Errorf("id %s", st.ID)
+	}
+}
+
+// Relations 14 and 52: the slug drops the "+", and a shared id fails the run at ingest.
+func TestSizeComboIDsDifferAcrossSimilarRelations(t *testing.T) {
+	ids := map[string]bool{}
+	for _, c := range []struct {
+		id        int
+		name, dir string
+	}{{52, "Anti-venom 3<->4", "forward"}, {14, "Anti-venom+ 3<->4", "forward"}, {52, "Anti-venom 3<->4", "reverse"}, {14, "Anti-venom+ 3<->4", "reverse"}} {
+		combo, buys, sells, snaps, limits, names := comboFixture()
+		combo.RelationID, combo.Relation, combo.Direction = c.id, c.name, c.dir
+		got, why := sizeCombo(combo, buys, sells, snaps, limits, names, nil, 50_000_000, packetDay)
+		if why != "" {
+			t.Fatal(why)
+		}
+		var st store.SidecarStrategy
+		if err := json.Unmarshal(got.draft, &st); err != nil {
+			t.Fatal(err)
+		}
+		if ids[st.ID] {
+			t.Errorf("%s repeats", st.ID)
+		}
+		ids[st.ID] = true
+	}
+}
+
+func TestSizeComboRefusesAnUnnamedItem(t *testing.T) {
+	c, buys, sells, snaps, limits, names := comboFixture()
+	delete(names, 2)
+	if got, why := sizeCombo(c, buys, sells, snaps, limits, names, nil, 50_000_000, packetDay); got != nil || !strings.Contains(why, "no name") {
+		t.Errorf("built %v, why %q", got != nil, why)
 	}
 }
 
 // The agent's validator rejects any other shape, which would fail the whole report.
 func TestDraftIDMatchesTheAgentsRule(t *testing.T) {
 	re := regexp.MustCompile(`^[FBSVCUHP]-[a-z0-9-]+-\d{8}$`)
-	for _, name := range []string{"Verac's armour set reverse", "Super restore 3<->4", "Armadyl helmet -> armadylean plate", "Masori mask (f)"} {
+	for _, name := range []string{"Verac's armour set reverse", "Super restore 3<->4", "Armadyl helmet -> armadylean plate", "Masori mask (f)", "Anti-venom+ 3<->4 reverse r14", "Black dragon leather r17"} {
 		if id := draftID("C", name, packetDay); !re.MatchString(id) {
 			t.Errorf("%q gave %q", name, id)
 		}
@@ -167,7 +204,7 @@ func TestProcessDraftCopiesTheHarnessNumbers(t *testing.T) {
 	if err := json.Unmarshal(raw, &st); err != nil {
 		t.Fatal(err)
 	}
-	if st.ID != "P-black-dragon-leather-20261031" || st.EntryPrice != 15830 || st.ExitPrice != 16840 || st.PrimaryItemID() != 2509 {
+	if st.ID != "P-black-dragon-leather-r17-20261031" || st.EntryPrice != 15830 || st.ExitPrice != 16840 || st.PrimaryItemID() != 2509 {
 		t.Errorf("%+v", st)
 	}
 	if st.Size.UnitsUsed != units || st.Size.BuyLimit != units || st.Size.VolConstrained != units {
@@ -198,13 +235,15 @@ func TestSplitSignals(t *testing.T) {
 		{SignalID: 2, Kind: "combo", ItemID: 20},
 		{SignalID: 3, Kind: "process", ItemID: 10},
 		{SignalID: 4, Kind: "process", ItemID: 30},
+		{SignalID: 5, Kind: "combo", ItemID: 40},
 	}
 	fate := map[packetKey]string{
 		{"C", 10}: "",
 		{"C", 20}: "under the C floor",
 		{"P", 10}: "already open",
+		{"C", 40}: lookupFailed + "conn reset",
 	}
-	assigned, dismiss := splitSignals(signals, fate)
+	assigned, dismiss := splitSignals(signals, fate, nil)
 	if len(assigned) != 1 || assigned[0].SignalID != 1 {
 		t.Errorf("assigned %+v", assigned)
 	}
@@ -214,6 +253,94 @@ func TestSplitSignals(t *testing.T) {
 	// Item 10 is a C candidate, which says nothing of the recipe that makes it.
 	if !strings.Contains(dismiss[4], "no longer clears") || len(dismiss) != 3 {
 		t.Errorf("dismiss %v", dismiss)
+	}
+	// A lane that couldn't be read says nothing about an item it doesn't mention.
+	if _, dismiss := splitSignals(signals, fate, map[string]bool{"P": true}); len(dismiss) != 2 || dismiss[4] != "" {
+		t.Errorf("unread lane: %v", dismiss)
+	}
+}
+
+func TestRefuseKeepsAFailedLookup(t *testing.T) {
+	b := &packetBuild{fate: map[packetKey]string{}}
+	key := packetKey{"C", 1}
+	b.refuse(key, lookupFailed+"boom")
+	b.refuse(key, "under the C floor")
+	if b.fate[key] != lookupFailed+"boom" {
+		t.Errorf("fate %q", b.fate[key])
+	}
+}
+
+// Every candidate owes a verdict, and a model's dismissal keeps it out for the cooldown:
+// without that, each hourly run re-judges the same list. Needs STORE_TEST_DSN.
+func TestAdmitHoldsOutWhatTheModelSettled(t *testing.T) {
+	dsn := os.Getenv("STORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("STORE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := store.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	const comboItem, queuedItem, recipeItem = 876591, 876592, 876593
+	items := []int{comboItem, queuedItem, recipeItem}
+	cleanup := func() { s.Pool.Exec(ctx, `DELETE FROM orchestrator.signals WHERE item_id = ANY($1)`, items) }
+	cleanup()
+	defer cleanup()
+
+	r := &Runner{Store: s, Cfg: Config{SignalDismissCooldown: 48 * time.Hour}}
+	output, gpHr := recipeItem, int64(400_000)
+	rows := []store.PacketRow{{RecipeID: 9, Name: "Recipe", OutputItem: &output, GpHr: &gpHr, Ship: true}}
+	build := func() *packetBuild {
+		rows[0].Ship = true
+		combo := &comboBuilt{row: store.ComboCandidate{PrimaryItemID: comboItem, PrimaryName: "x", BudgetCycleGp: 500_000}, draft: json.RawMessage(`{}`)}
+		queued := &comboBuilt{row: store.ComboCandidate{PrimaryItemID: queuedItem, PrimaryName: "y", BudgetCycleGp: 400_000}, draft: json.RawMessage(`{}`)}
+		return &packetBuild{combos: []*comboBuilt{combo, queued}, recipes: []recipeBuilt{{&rows[0], candidate{Lane: "P", Draft: json.RawMessage(`{}`)}}}}
+	}
+	if _, err := s.UpsertSignal(ctx, "combo", queuedItem, "y", map[string]any{"budget_cycle_gp": 400000}, 0); err != nil {
+		t.Fatal(err)
+	}
+	signals, err := s.PendingSignals(ctx, evaluateKinds, signalBatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var queued []store.Signal
+	for _, sig := range signals {
+		if sig.ItemID == queuedItem {
+			queued = append(queued, sig)
+		}
+	}
+
+	got, added := r.admit(ctx, build(), queued)
+	if len(got) != 3 || len(added) != 2 {
+		t.Fatalf("first look: %d candidates, %d new signals", len(got), len(added))
+	}
+	if !rows[0].Ship {
+		t.Error("a first look shouldn't hold the recipe out")
+	}
+
+	// The model turns down the conversion and the recipe; the queued signal is still live.
+	for _, sig := range added {
+		if err := s.ResolveSignal(ctx, sig.SignalID, "dismissed", "margin_collapse"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, added = r.admit(ctx, build(), queued)
+	if len(got) != 1 || len(added) != 0 {
+		t.Errorf("after the verdicts: %d candidates, %d new signals", len(got), len(added))
+	}
+	if rows[0].Ship || rows[0].Why == "" {
+		t.Errorf("a held-out recipe stays shippable in the record: %+v", rows[0])
+	}
+
+	// The script's own refusal only said the item didn't clear then: passing now, it comes back.
+	if _, err := s.Pool.Exec(ctx, `UPDATE orchestrator.signals SET reason='script: under the C floor'
+		WHERE item_id = ANY($1) AND status='dismissed'`, items); err != nil {
+		t.Fatal(err)
+	}
+	if got, added = r.admit(ctx, build(), queued); len(got) != 3 || len(added) != 2 {
+		t.Errorf("after script refusals: %d candidates, %d new signals", len(got), len(added))
 	}
 }
 
@@ -290,7 +417,7 @@ func TestEvaluateRunWiring(t *testing.T) {
 		Store: s, Hub: NewHub(),
 		Cfg: Config{
 			AgentPath: agent, Directive: "/research.md", EvaluateDirective: "/evaluate.md", StateDir: dir,
-			SignalRunMode: ModeEvaluate, GraveyardCooldown: time.Hour,
+			SignalRunMode: ModeEvaluate, GraveyardCooldown: time.Hour, SignalDismissCooldown: 48 * time.Hour,
 			ExtraEnv: []string{"GE_AGENT_MAX_TURNS=80"},
 		},
 		Prices: scriptedPrices{snap: func(int) (*eval.ProcessSnap, error) { return goodRecipe(), nil }},

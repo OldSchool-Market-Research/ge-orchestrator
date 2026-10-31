@@ -45,6 +45,9 @@ type Config struct {
 	SignalRunMode string
 	// EvaluateDirective is an evaluate run's directive (absolute path).
 	EvaluateDirective string
+	// SignalDismissCooldown is how long a model's dismissal holds a candidate out of the
+	// packet, the collector's DismissCooldown. Zero turns the hold off.
+	SignalDismissCooldown time.Duration
 }
 
 type Runner struct {
