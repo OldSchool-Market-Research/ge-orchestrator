@@ -116,3 +116,24 @@ func (ev *Evaluator) recalibrateFamily(ctx context.Context, relationID *int) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// Terms is what closes a strategy of one lane, as transition applies it: how
+// many kill signals in a row end it, and the bars at the end of its window. The
+// dashboard explains a running strategy against these.
+type Terms struct {
+	KillConsecutive int
+	HealthyShare    float64
+	RatioBar        float64
+	MinPer1hGp      int64
+}
+
+// TermsFor returns the lane's terms at the current calibration.
+func (ev *Evaluator) TermsFor(ctx context.Context, archetype string) Terms {
+	pol := policyFor(archetype)
+	return Terms{
+		KillConsecutive: pol.KillConsecutive,
+		HealthyShare:    pol.ConfirmHealthy,
+		RatioBar:        pol.ConfirmRatioMin * ev.calFactor(ctx, archetype),
+		MinPer1hGp:      pol.ConfirmMinPer1hGp,
+	}
+}

@@ -25,6 +25,8 @@ import (
 //	tool_error  the final line is a tool failure: the agent's fatal
 //	            "tool <name>: <error>" or a "tool <name> (err=true, ...)" line
 //	            ("(err=false" lines are ordinary successful calls)
+//	timeout     the run hit its time limit ("context deadline exceeded" as the
+//	            final line, not inside a tool failure)
 //	other       anything else
 const (
 	failRestart   = "restart"
@@ -32,6 +34,7 @@ const (
 	failMaxTurns  = "max_turns"
 	failMaxTokens = "max_tokens"
 	failToolError = "tool_error"
+	failTimeout   = "timeout"
 	failOther     = "other"
 )
 
@@ -86,9 +89,13 @@ func classifyFail(reason string) (kind, detail string) {
 		return failToolError, m[1]
 	}
 
+	if strings.HasSuffix(last, "context deadline exceeded") {
+		return failTimeout, ""
+	}
+
 	// An agent tail's first 120 runes are the runner's wrapper and the
 	// oldest, timestamped tail line; the last line is what ended the run
-	// ("turn 1: llm http 429: ...", "context deadline exceeded"), and without
+	// ("turn 1: llm http 429: ..."), and without
 	// its timestamp and turn number equal causes group together.
 	if strings.Contains(reason, "ge-agent: ") {
 		return failOther, truncRunes(strings.TrimSpace(reTurnPrefix.ReplaceAllString(last, "")), 120)

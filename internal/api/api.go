@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +42,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/strategies/{id}", s.getStrategy)
 	mux.HandleFunc("GET /api/scoreboard", s.scoreboard)
 	mux.HandleFunc("GET /api/pnl", s.pnl)
+	mux.HandleFunc("GET /api/outcomes", s.outcomes)
 	mux.HandleFunc("GET /api/watchlist", s.listWatchlist)
 	mux.HandleFunc("POST /api/watchlist", s.addWatch)
 	mux.HandleFunc("DELETE /api/watchlist/{id}", s.retireWatch)
@@ -75,6 +77,25 @@ func daysParam(w http.ResponseWriter, r *http.Request, def int) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// maxWindowHours is the longest ?hours= window: ten years, past anything stored.
+const maxWindowHours = 87600
+
+// hoursParam reads the optional ?hours= window as its start (nil: no window),
+// writing the 400 itself when bad.
+func hoursParam(w http.ResponseWriter, r *http.Request) (*time.Time, bool) {
+	h := r.URL.Query().Get("hours")
+	if h == "" {
+		return nil, true
+	}
+	n, err := strconv.Atoi(h)
+	if err != nil || n < 1 || n > maxWindowHours {
+		writeErr(w, 400, fmt.Sprintf("hours must be 1..%d", maxWindowHours))
+		return nil, false
+	}
+	since := time.Now().Add(-time.Duration(n) * time.Hour)
+	return &since, true
 }
 
 // allocation serves the lane allocation in log mode: the latest row with its
@@ -221,14 +242,26 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxRunList caps GET /api/runs. The list carries no briefs, so even every run
+// on record stays a small response.
+const maxRunList = 5000
+
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
+	since, ok := hoursParam(w, r)
+	if !ok {
+		return
+	}
+	// a window asks for all of itself; a bare list stays short
 	limit := 20
+	if since != nil {
+		limit = maxRunList
+	}
 	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= maxRunList {
 			limit = n
 		}
 	}
-	runs, err := s.Store.Runs(r.Context(), limit)
+	runs, err := s.Store.Runs(r.Context(), since, limit)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -516,7 +549,15 @@ func (s *Server) getStrategy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"strategy": st, "evaluations": evals, "item_icons": iconsFor(*st, icons)})
+	o, err := s.Store.OutcomeByID(r.Context(), id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if o != nil {
+		s.fillTerms(r.Context(), o, map[string]eval.Terms{})
+	}
+	writeJSON(w, 200, map[string]any{"strategy": st, "evaluations": evals, "item_icons": iconsFor(*st, icons), "outcome": o})
 }
 
 // trailLen is how many of a strategy's newest evaluations GET
@@ -542,6 +583,38 @@ func (s *Server) scoreboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, rows)
+}
+
+// outcomes lists every strategy shipped or alive in the ?hours= window (no
+// window: all of them) with why it closed and what it made on paper.
+func (s *Server) outcomes(w http.ResponseWriter, r *http.Request) {
+	since, ok := hoursParam(w, r)
+	if !ok {
+		return
+	}
+	rows, err := s.Store.Outcomes(r.Context(), since)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if rows == nil {
+		rows = []store.Outcome{}
+	}
+	terms := map[string]eval.Terms{}
+	for i := range rows {
+		s.fillTerms(r.Context(), &rows[i], terms)
+	}
+	writeJSON(w, 200, map[string]any{"as_of": time.Now().UTC(), "rows": rows})
+}
+
+// fillTerms adds what closes this lane's strategies, cached per lane in `seen`.
+func (s *Server) fillTerms(ctx context.Context, o *store.Outcome, seen map[string]eval.Terms) {
+	t, ok := seen[o.Archetype]
+	if !ok {
+		t = s.Evaluator.TermsFor(ctx, o.Archetype)
+		seen[o.Archetype] = t
+	}
+	o.KillNeeded, o.ConfirmHealthy, o.ConfirmRatioBar, o.ConfirmMinPer1hGp = t.KillConsecutive, t.HealthyShare, t.RatioBar, t.MinPer1hGp
 }
 
 // pnl is the proof-of-work view: what following every paper-traded strategy

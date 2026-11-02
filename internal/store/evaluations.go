@@ -255,16 +255,7 @@ func (s *Store) PnL(ctx context.Context) ([]PnLRow, error) {
 			&r.RunID, &r.PrimaryItemID, &r.PrimaryItemName, &r.Icon); err != nil {
 			return nil, err
 		}
-		switch {
-		case finalEquity != nil:
-			// Sim-scored close: the frozen ledger equity IS the realized
-			// number — no pace-times-hours estimate involved.
-			r.EstRealizedGp = finalEquity
-			r.SimScored = true
-		case r.MedRealized1h != nil:
-			v := int64(*r.MedRealized1h * r.Hours)
-			r.EstRealizedGp = &v
-		}
+		r.EstRealizedGp, r.SimScored = realizedEstimate(r.MedRealized1h, finalEquity, r.Hours)
 		if per1h != nil {
 			v := int64(float64(*per1h) * r.Hours)
 			r.ProjectedGp = &v
@@ -272,6 +263,20 @@ func (s *Store) PnL(ctx context.Context) ([]PnLRow, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// realizedEstimate is a strategy's paper result. Sim-scored close: the frozen
+// ledger equity IS the realized number, no pace-times-hours estimate involved.
+// Otherwise median realized pace x hours; nil when no evaluation had a pace.
+func realizedEstimate(med1h *float64, finalEquity *int64, hours float64) (est *int64, simScored bool) {
+	if finalEquity != nil {
+		return finalEquity, true
+	}
+	if med1h != nil {
+		v := int64(*med1h * hours)
+		return &v, false
+	}
+	return nil, false
 }
 
 // RecentlyClosed lists recently killed/expired strategies for the brief's
