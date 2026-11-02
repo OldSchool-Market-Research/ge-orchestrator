@@ -47,6 +47,13 @@ func TestClassifyFail(t *testing.T) {
 			detail: strings.TrimSpace(truncRunes(strings.Replace(cFloor, "[0]", "[]", 1), 160)),
 		},
 		{
+			name: "timeout, the run hit its time limit (run 8740)",
+			reason: wrap + "ge-agent: 2026/11/02 10:25:13 kimi turn 1: 1 tool call(s) | " +
+				"ge-agent: 2026/11/02 10:25:15 turn 1: stop=tool_use in=0 out=0 pruned=0B | " +
+				"ge-agent: 2026/11/02 10:25:15 turn 1: context deadline exceeded",
+			kind: "timeout",
+		},
+		{
 			name: "max_turns, err=false-only tail (run 8650)",
 			reason: wrap + "ge-agent: 2026/10/29 05:37:03   tool combo_quote (err=false, 1419 bytes) | " +
 				"ge-agent: 2026/10/29 05:37:04 turn 80: stop=tool_use in=1165 out=40 pruned=220974B | " +

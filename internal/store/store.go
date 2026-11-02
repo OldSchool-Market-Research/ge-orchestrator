@@ -104,8 +104,8 @@ type Run struct {
 	StartedAt  time.Time       `json:"started_at"`
 	FinishedAt *time.Time      `json:"finished_at"`
 	Status     string          `json:"status"`
-	Brief      json.RawMessage `json:"brief"`
-	BriefText  string          `json:"brief_text"`
+	Brief      json.RawMessage `json:"brief,omitempty"`
+	BriefText  string          `json:"brief_text,omitempty"`
 	ReportPath *string         `json:"report_path"`
 	FailReason *string         `json:"fail_reason"`
 	NStrats    int             `json:"n_strategies"`
@@ -185,13 +185,17 @@ func (s *Store) OrphanRunningRuns(ctx context.Context) (int64, error) {
 	return n, err
 }
 
-func (s *Store) Runs(ctx context.Context, limit int) ([]Run, error) {
+// Runs lists runs newest first, those started since `since` when it is set. The
+// brief stays out: it is most of a run row's size and only GET /api/runs/{id} shows it.
+func (s *Store) Runs(ctx context.Context, since *time.Time, limit int) ([]Run, error) {
 	rows, err := s.Pool.Query(ctx, `SELECT r.run_id, r.started_at, r.finished_at, r.status,
-		r.brief, r.brief_text, r.report_path, r.fail_reason,
+		r.report_path, r.fail_reason,
 		(SELECT count(*) FROM orchestrator.strategies st WHERE st.run_id = r.run_id),
 		r.trigger_source, r.turns, r.tool_calls, r.input_tokens, r.output_tokens,
 		r.peak_input_tokens, r.pruned_bytes, r.mode
-		FROM orchestrator.runs r ORDER BY r.run_id DESC LIMIT $1`, limit)
+		FROM orchestrator.runs r
+		WHERE $1::timestamptz IS NULL OR r.started_at >= $1
+		ORDER BY r.run_id DESC LIMIT $2`, since, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +204,7 @@ func (s *Store) Runs(ctx context.Context, limit int) ([]Run, error) {
 	for rows.Next() {
 		var r Run
 		if err := rows.Scan(&r.RunID, &r.StartedAt, &r.FinishedAt, &r.Status,
-			&r.Brief, &r.BriefText, &r.ReportPath, &r.FailReason, &r.NStrats,
+			&r.ReportPath, &r.FailReason, &r.NStrats,
 			&r.TriggerSource, &r.Turns, &r.ToolCalls, &r.InputTokens, &r.OutputTokens,
 			&r.PeakInputTokens, &r.PrunedBytes, &r.Mode); err != nil {
 			return nil, err
