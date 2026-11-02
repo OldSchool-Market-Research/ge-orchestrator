@@ -242,6 +242,28 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// runWithFail is a run plus its failure sorted into a kind. Both fields are present
+// only on failed runs (detail may be ""), so pointers rather than plain omitempty
+// strings.
+type runWithFail struct {
+	store.Run
+	FailKind   *string `json:"fail_kind,omitempty"`
+	FailDetail *string `json:"fail_detail,omitempty"`
+}
+
+func withFail(run store.Run) runWithFail {
+	v := runWithFail{Run: run}
+	if run.Status == "failed" {
+		reason := ""
+		if run.FailReason != nil {
+			reason = *run.FailReason
+		}
+		kind, detail := classifyFail(reason)
+		v.FailKind, v.FailDetail = &kind, &detail
+	}
+	return v
+}
+
 // maxRunList caps GET /api/runs. The list carries no briefs, so even every run
 // on record stays a small response.
 const maxRunList = 5000
@@ -276,27 +298,15 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// fail_kind/fail_detail are present only on failed runs (detail may be
-	// ""), so pointers rather than plain omitempty strings.
 	type runView struct {
-		store.Run
-		Shipped    []store.ShippedStrategy `json:"shipped"`
-		FailKind   *string                 `json:"fail_kind,omitempty"`
-		FailDetail *string                 `json:"fail_detail,omitempty"`
+		runWithFail
+		Shipped []store.ShippedStrategy `json:"shipped"`
 	}
 	out := make([]runView, 0, len(runs))
 	for _, run := range runs {
-		v := runView{Run: run, Shipped: shipped[run.RunID]}
+		v := runView{runWithFail: withFail(run), Shipped: shipped[run.RunID]}
 		if v.Shipped == nil {
 			v.Shipped = []store.ShippedStrategy{}
-		}
-		if run.Status == "failed" {
-			reason := ""
-			if run.FailReason != nil {
-				reason = *run.FailReason
-			}
-			kind, detail := classifyFail(reason)
-			v.FailKind, v.FailDetail = &kind, &detail
 		}
 		out = append(out, v)
 	}
@@ -353,7 +363,7 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"run": run, "strategies": strategies})
+	writeJSON(w, 200, map[string]any{"run": withFail(*run), "strategies": strategies})
 }
 
 func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {

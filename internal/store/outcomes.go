@@ -166,7 +166,8 @@ func scanOutcome(rows pgx.Rows) (Outcome, error) {
 		o.KillStreak++
 	}
 
-	if o.State == "vetoed" || (o.State == "armed" && o.TriggeredAt == nil) {
+	neverFired := o.TriggeredAt == nil && (o.State == "armed" || (o.FailureMode != nil && *o.FailureMode == "never_triggered"))
+	if o.State == "vetoed" || neverFired {
 		o.Hours = 0 // never traded: the clock above would read its age
 		return o, nil
 	}
