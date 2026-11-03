@@ -26,6 +26,9 @@ RUN CGO_ENABLED=0 GOOS=linux \
 FROM node:22.23.3-bookworm-slim
 RUN npm install -g --omit=optional @moonshot-ai/kimi-code@2.3.1 \
  && npm cache clean --force
+# Node bundles its own CA roots but this slim base ships none, and Go reads the
+# system bundle: without it every ntfy ping fails certificate verification.
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/ge-orchestrator /ge-orchestrator
 COPY --from=agent /ge-agent /bin/ge-agent
 COPY --from=agent /etc/ge-agent/DIRECTIVE.md /etc/ge-agent/DIRECTIVE.md

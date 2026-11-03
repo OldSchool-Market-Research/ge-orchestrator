@@ -72,8 +72,9 @@ func (n *Notifier) StrategyShipped(ctx context.Context, st store.SidecarStrategy
 		return
 	}
 	title, body := format(st, per1h, calibrated)
-	n.post(ctx, st.ID, title, body, "moneybag")
-	log.Printf("notify: pinged for %s (%s gp/hr projected)", st.ID, gp(per1h))
+	if n.post(ctx, st.ID, title, body, "moneybag") {
+		log.Printf("notify: pinged for %s (%s gp/hr projected)", st.ID, gp(per1h))
+	}
 }
 
 // StrategyConfirmed pings when a strategy closes CONFIRMED — the record's
@@ -107,28 +108,32 @@ func (n *Notifier) StrategyConfirmed(ctx context.Context, st store.Strategy, rea
 		lines = append(lines, fmt.Sprintf("attention: %.1f checks/hr, safe unattended %.0fh",
 			st.AttentionSpec.ChecksPerHour, st.AttentionSpec.MaxUnattendedHours))
 	}
-	n.post(ctx, st.Sid, title, strings.Join(lines, "\n"), "white_check_mark")
-	log.Printf("notify: confirm ping for %s (%s gp/hr realized)", st.Sid, gp(realizedPer1h))
+	if n.post(ctx, st.Sid, title, strings.Join(lines, "\n"), "white_check_mark") {
+		log.Printf("notify: confirm ping for %s (%s gp/hr realized)", st.Sid, gp(realizedPer1h))
+	}
 }
 
-// post fires one ntfy request. Failures are logged, never returned.
-func (n *Notifier) post(ctx context.Context, sid, title, body, tags string) {
+// post fires one ntfy request and reports whether ntfy accepted it. Failures
+// are logged here, never returned as errors: a ping must not fail its caller.
+func (n *Notifier) post(ctx context.Context, sid, title, body, tags string) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.Cfg.URL, strings.NewReader(body))
 	if err != nil {
 		log.Printf("notify: %s: %v", sid, err)
-		return
+		return false
 	}
 	req.Header.Set("Title", title)
 	req.Header.Set("Tags", tags)
 	resp, err := n.Client.Do(req)
 	if err != nil {
 		log.Printf("notify: %s: %v", sid, err)
-		return
+		return false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		log.Printf("notify: %s: ntfy returned %s", sid, resp.Status)
+		return false
 	}
+	return true
 }
 
 // firstItemName digs the display name out of the stored items JSON (the
