@@ -1,10 +1,13 @@
 package notify
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -160,6 +163,59 @@ func TestStrategyConfirmedPosts(t *testing.T) {
 	n.StrategyConfirmed(context.Background(), busy, 900_000)
 	if calls != 1 {
 		t.Fatal("over-attention confirm must not POST")
+	}
+}
+
+// A ping that never reached ntfy must not log as sent: that line is the only
+// record of a ping, and a false one helped hide days of TLS failures.
+func TestSuccessLogRequiresAcceptedPost(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	spec := &store.AttentionSpec{ChecksPerHour: 0.5, MaxUnattendedHours: 12}
+	confirmed := store.Strategy{Sid: "F-x", Items: []byte(`[{"name":"X"}]`), AttentionSpec: spec}
+	ping := func(n *Notifier) string {
+		buf.Reset()
+		n.StrategyShipped(context.Background(), fixture(300_000, nil, spec), nil)
+		n.StrategyConfirmed(context.Background(), confirmed, 300_000)
+		return buf.String()
+	}
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+	}))
+	defer srv.Close()
+	n := New(Config{URL: srv.URL, MinPer1hGp: 250_000, MaxChecksPerHour: 2})
+
+	got := ping(n)
+	for _, want := range []string{"pinged for", "confirm ping for"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("accepted POST: log missing %q:\n%s", want, got)
+		}
+	}
+
+	status = http.StatusInternalServerError
+	got = ping(n)
+	if strings.Contains(got, "pinged for") || strings.Contains(got, "confirm ping for") {
+		t.Fatalf("rejected POST logged as sent:\n%s", got)
+	}
+	if !strings.Contains(got, "ntfy returned 500") {
+		t.Fatalf("rejected POST not logged:\n%s", got)
+	}
+
+	// The test server's certificate is untrusted, the same failure as a
+	// runtime image with no CA bundle.
+	tlsSrv := httptest.NewUnstartedServer(http.NotFoundHandler())
+	tlsSrv.Config.ErrorLog = log.New(io.Discard, "", 0)
+	tlsSrv.StartTLS()
+	defer tlsSrv.Close()
+	got = ping(New(Config{URL: tlsSrv.URL, MinPer1hGp: 250_000, MaxChecksPerHour: 2}))
+	if strings.Contains(got, "pinged for") || strings.Contains(got, "confirm ping for") {
+		t.Fatalf("failed POST logged as sent:\n%s", got)
+	}
+	if !strings.Contains(got, "x509") {
+		t.Fatalf("certificate failure not logged:\n%s", got)
 	}
 }
 
